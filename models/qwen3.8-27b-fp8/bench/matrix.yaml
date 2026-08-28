@@ -1,0 +1,130 @@
+# Benchmark matrix for orcarouter/Qwen3.8-27B-Uncensored-FP8 on NVIDIA DGX Spark (GB10)
+#
+#   sg docker -c ".hf-venv/bin/python common/bench/run.py --model models/qwen3.8-27b-fp8 --suite <name>"
+#
+# Image / caches / repo id / served name / port come from  common/box.env +
+# models/qwen3.8-27b-fp8/model.env . This file is ONLY the sweep: `models` (repo
+# ids to resolve from the HF cache), per-config knobs, workloads, and suites.
+# One container per `config`, paired with `workloads` driven by `vllm bench serve`.
+#
+# GB10 notes:
+#  - 128 GB *unified* LPDDR5x: --gpu-memory-utilization carves from the whole pool.
+#  - VLLM_USE_DEEP_GEMM=0 mandatory (asserts on sm_121); set in box.env + env below.
+#  - nvidia-smi reports N/A for GPU memory; the runner measures `free -m`.
+
+defaults:
+  models:                              # repo ids; run.py resolves the newest local snapshot
+    fp8:  {path: orcarouter/Qwen3.8-27B-Uncensored-FP8}
+    bf16: {path: orcarouter/Qwen3.8-27B-Uncensored}
+  # appended to every `vllm serve` in the sweep
+  common_flags:
+    - --language-model-only            # text-only for the throughput sweep (vision A/B is separate)
+    - --trust-remote-code
+    - --reasoning-parser=qwen3
+    - --enable-auto-tool-choice
+    - --tool-call-parser=qwen3_coder
+  env:
+    VLLM_USE_DEEP_GEMM: "0"
+    LANG: C.UTF-8
+    LC_ALL: C.UTF-8
+    HF_HUB_OFFLINE: "1"
+  # per-config knobs and their defaults
+  config_defaults:
+    model: fp8
+    gpu_memory_utilization: 0.65
+    max_model_len: 32768
+    max_num_seqs: 32
+    kv_cache_dtype: fp8          # fp8 | auto(=bf16)
+    spec: {method: mtp, num_speculative_tokens: 3}   # or null for no speculation
+    prefix_caching: false        # vLLM default with MTP in 0.24.0
+    max_num_batched_tokens: null # null => vLLM default
+    extra_flags: []
+  # per-workload knobs and their defaults (fed to `vllm bench serve`)
+  workload_defaults:
+    input_len: 1024
+    output_len: 1024
+    num_prompts: 16
+    concurrency: 16
+    request_rate: inf
+    ignore_eos: true
+    warmups: 3
+  server_startup_timeout_s: 1200
+  teardown_pause_s: 12
+
+# ----------------------------------------------------------------------------
+workloads:
+  # --- harness validation ------------------------------------------------
+  smoke_stream: {input_len: 256, output_len: 256, num_prompts: 3, concurrency: 1, warmups: 1}
+  smoke_batch:  {input_len: 512, output_len: 256, num_prompts: 8, concurrency: 8, warmups: 1}
+
+  # --- MTP-sweep workloads (kept short; MTP effect shows at all batch sizes) ---
+  single_stream:      {input_len: 512,  output_len: 1024, num_prompts: 3,  concurrency: 1}
+  batch8_balanced:    {input_len: 1024, output_len: 1024, num_prompts: 16, concurrency: 8}
+  codegen_decode:     {input_len: 1024, output_len: 4096, num_prompts: 8,  concurrency: 8}
+  saturate32:         {input_len: 1024, output_len: 1024, num_prompts: 64, concurrency: 32}
+
+  # --- context-scaling workloads (input ~45% of ctx; n scaled to keep KV real) ---
+  ctx4k_load:    {input_len: 1800,   output_len: 400,  num_prompts: 12, concurrency: 8}
+  ctx8k_load:    {input_len: 3600,   output_len: 800,  num_prompts: 12, concurrency: 8}
+  ctx16k_load:   {input_len: 7200,   output_len: 1600, num_prompts: 8,  concurrency: 6}
+  ctx32k_load:   {input_len: 14000,  output_len: 3000, num_prompts: 6,  concurrency: 4}
+  ctx64k_load:   {input_len: 28000,  output_len: 4000, num_prompts: 4,  concurrency: 3}
+  ctx128k_load:  {input_len: 56000,  output_len: 8000, num_prompts: 2,  concurrency: 2}
+  ctx256k_load:  {input_len: 110000, output_len: 8000, num_prompts: 1,  concurrency: 1}
+
+# ----------------------------------------------------------------------------
+configs:
+  # --- FP8 MTP token sweep (32k, fixed everything except spec tokens) -------
+  fp8_spec_off: {model: fp8, spec: null}
+  fp8_spec_1:   {model: fp8, spec: {method: mtp, num_speculative_tokens: 1}}
+  fp8_spec_2:   {model: fp8, spec: {method: mtp, num_speculative_tokens: 2}}
+  fp8_spec_3:   {model: fp8, spec: {method: mtp, num_speculative_tokens: 3}}
+  fp8_spec_4:   {model: fp8, spec: {method: mtp, num_speculative_tokens: 4}}
+
+  # --- FP8 context scaling (mtp=3, kv fp8, gmu 0.80 to admit the big KV) ----
+  fp8_ctx_4k:   {model: fp8, max_model_len: 4096,   max_num_seqs: 16, gpu_memory_utilization: 0.80}
+  fp8_ctx_8k:   {model: fp8, max_model_len: 8192,   max_num_seqs: 16, gpu_memory_utilization: 0.80}
+  fp8_ctx_16k:  {model: fp8, max_model_len: 16384,  max_num_seqs: 12, gpu_memory_utilization: 0.80}
+  fp8_ctx_32k:  {model: fp8, max_model_len: 32768,  max_num_seqs: 8,  gpu_memory_utilization: 0.80}
+  fp8_ctx_64k:  {model: fp8, max_model_len: 65536,  max_num_seqs: 6,  gpu_memory_utilization: 0.80}
+  fp8_ctx_128k: {model: fp8, max_model_len: 131072, max_num_seqs: 3,  gpu_memory_utilization: 0.85}
+  fp8_ctx_256k: {model: fp8, max_model_len: 262144, max_num_seqs: 1,  gpu_memory_utilization: 0.85}
+
+  # --- BF16 MTP token sweep (mirror of FP8; kv auto = bf16, the true baseline) ---
+  bf16_spec_off: {model: bf16, spec: null,                                      kv_cache_dtype: auto, gpu_memory_utilization: 0.70}
+  bf16_spec_2:   {model: bf16, spec: {method: mtp, num_speculative_tokens: 2},  kv_cache_dtype: auto, gpu_memory_utilization: 0.70}
+  bf16_spec_3:   {model: bf16, spec: {method: mtp, num_speculative_tokens: 3},  kv_cache_dtype: auto, gpu_memory_utilization: 0.70}
+  bf16_spec_4:   {model: bf16, spec: {method: mtp, num_speculative_tokens: 4},  kv_cache_dtype: auto, gpu_memory_utilization: 0.70}
+
+# ----------------------------------------------------------------------------
+# A suite = ordered list of [config, [workloads...]] pairs.
+suites:
+  mtp_sweep_fp8:
+    - [fp8_spec_off, [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [fp8_spec_1,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [fp8_spec_2,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [fp8_spec_3,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [fp8_spec_4,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+
+  context_scaling_fp8:
+    - [fp8_ctx_4k,   [ctx4k_load]]
+    - [fp8_ctx_8k,   [ctx8k_load]]
+    - [fp8_ctx_16k,  [ctx16k_load]]
+    - [fp8_ctx_32k,  [ctx32k_load]]
+    - [fp8_ctx_64k,  [ctx64k_load]]
+    - [fp8_ctx_128k, [ctx128k_load]]
+    - [fp8_ctx_256k, [ctx256k_load]]
+
+  mtp_sweep_bf16:
+    - [bf16_spec_off, [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [bf16_spec_2,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [bf16_spec_3,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [bf16_spec_4,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+
+  # convenience: the full overnight batch, in run order
+  overnight:
+    include: [mtp_sweep_fp8, context_scaling_fp8, mtp_sweep_bf16]
+
+  # tiny end-to-end validation of the harness (~1 server start, ~2 short runs)
+  smoke:
+    - [fp8_spec_3, [smoke_stream, smoke_batch]]

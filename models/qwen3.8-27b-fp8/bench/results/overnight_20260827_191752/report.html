@@ -1,0 +1,855 @@
+<title>Qwen3.8-27B on DGX Spark</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+
+<style>
+:root {
+  --ground:      #F4F6F2;
+  --surface:     #FBFCFA;
+  --surface-2:   #EBEFE9;
+  --ink:         #16201B;
+  --ink-dim:     #58635C;
+  --ink-faint:   #8A948C;
+  --hair:        #DBE0D9;
+  --hair-strong: #C4CCC2;
+  --accent:      #0F7B52;   /* FP8 / primary signal */
+  --accent-ink:  #0B5C3D;
+  --accent-soft: #DFEFE6;
+  --blue:        #2A6A99;   /* BF16 series */
+  --blue-soft:   #DDEBF4;
+  --amber:       #9C5A12;   /* latency cliff / caveats */
+  --amber-soft:  #F3E7D4;
+  --shadow:      0 1px 2px rgba(20,40,30,.05), 0 8px 24px -12px rgba(20,40,30,.12);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:      #0C120F;
+    --surface:     #121A16;
+    --surface-2:   #1A241E;
+    --ink:         #E5ECE7;
+    --ink-dim:     #909C94;
+    --ink-faint:   #667069;
+    --hair:        #232E28;
+    --hair-strong: #33413A;
+    --accent:      #43DD8C;
+    --accent-ink:  #7CE9B2;
+    --accent-soft: #10281D;
+    --blue:        #6BB2E0;
+    --blue-soft:   #122431;
+    --amber:       #E4A64A;
+    --amber-soft:  #2B2112;
+    --shadow:      0 1px 2px rgba(0,0,0,.4), 0 10px 30px -14px rgba(0,0,0,.6);
+  }
+}
+:root[data-theme="dark"] {
+  --ground:      #0C120F;
+  --surface:     #121A16;
+  --surface-2:   #1A241E;
+  --ink:         #E5ECE7;
+  --ink-dim:     #909C94;
+  --ink-faint:   #667069;
+  --hair:        #232E28;
+  --hair-strong: #33413A;
+  --accent:      #43DD8C;
+  --accent-ink:  #7CE9B2;
+  --accent-soft: #10281D;
+  --blue:        #6BB2E0;
+  --blue-soft:   #122431;
+  --amber:       #E4A64A;
+  --amber-soft:  #2B2112;
+  --shadow:      0 1px 2px rgba(0,0,0,.4), 0 10px 30px -14px rgba(0,0,0,.6);
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1000px; margin: 0 auto; padding: 0 24px 120px; }
+.prose { max-width: 66ch; }
+
+/* ---- type ---- */
+h1, h2, h3 { font-weight: 600; line-height: 1.2; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(1.9rem, 1.3rem + 2.6vw, 2.9rem); letter-spacing: -0.02em; }
+h2 { font-size: clamp(1.3rem, 1.05rem + 1.1vw, 1.65rem); letter-spacing: -0.01em; }
+h3 { font-size: 1.06rem; }
+p { margin: 0 0 1rem; }
+a { color: var(--accent-ink); text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent); text-underline-offset: 2px; }
+strong { font-weight: 600; }
+code, .mono, .num { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace; }
+code {
+  font-size: 0.85em; background: var(--surface-2); border: 1px solid var(--hair);
+  padding: 0.08em 0.38em; border-radius: 4px; white-space: nowrap;
+}
+.num { font-variant-numeric: tabular-nums; }
+
+.eyebrow {
+  font-family: "IBM Plex Mono", monospace; font-size: 0.72rem; font-weight: 500;
+  letter-spacing: 0.18em; text-transform: uppercase; color: var(--accent-ink);
+  display: flex; align-items: center; gap: 0.6em;
+}
+.eyebrow::before { content: ""; width: 1.6em; height: 1px; background: var(--accent); opacity: .8; }
+
+/* ---- header ---- */
+header { padding: 72px 0 40px; border-bottom: 1px solid var(--hair); }
+.kicker {
+  font-family: "IBM Plex Mono", monospace; font-size: 0.75rem; letter-spacing: 0.16em;
+  text-transform: uppercase; color: var(--ink-dim); margin-bottom: 1.4rem;
+}
+header h1 { margin-bottom: 0.8rem; }
+.lede { font-size: 1.15rem; color: var(--ink-dim); max-width: 60ch; }
+.meta {
+  margin-top: 1.8rem; display: flex; flex-wrap: wrap; gap: 6px 10px;
+  font-family: "IBM Plex Mono", monospace; font-size: 0.76rem; color: var(--ink-dim);
+}
+.meta span {
+  background: var(--surface); border: 1px solid var(--hair); border-radius: 999px;
+  padding: 3px 11px;
+}
+
+/* ---- KPI band ---- */
+.kpis {
+  margin: 40px 0 8px; display: grid; gap: 12px;
+  grid-template-columns: repeat(4, 1fr);
+}
+@media (max-width: 760px) { .kpis { grid-template-columns: repeat(2, 1fr); } }
+.kpi {
+  background: var(--surface); border: 1px solid var(--hair); border-radius: 12px;
+  padding: 16px 16px 14px; box-shadow: var(--shadow);
+}
+.kpi .label {
+  font-family: "IBM Plex Mono", monospace; font-size: 0.68rem; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--ink-faint);
+}
+.kpi .value {
+  font-family: "IBM Plex Mono", monospace; font-weight: 600;
+  font-size: 1.7rem; letter-spacing: -0.02em; margin-top: 4px; color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.kpi .value .unit { font-size: 0.9rem; color: var(--ink-dim); font-weight: 400; }
+.kpi .sub { font-size: 0.8rem; color: var(--ink-dim); margin-top: 2px; }
+
+/* ---- sections ---- */
+section { padding: 56px 0 0; }
+section > .eyebrow { margin-bottom: 14px; }
+section > h2 { margin-bottom: 16px; }
+section .prose { margin-top: 4px; }
+
+/* ---- callout ---- */
+.note {
+  border-left: 2px solid var(--accent); background: var(--accent-soft);
+  padding: 14px 18px; border-radius: 0 8px 8px 0; margin: 20px 0;
+  font-size: 0.95rem; max-width: 68ch;
+}
+.note.warn { border-color: var(--amber); background: var(--amber-soft); }
+.note .h {
+  font-family: "IBM Plex Mono", monospace; font-size: 0.72rem; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--ink-dim); display: block; margin-bottom: 3px;
+}
+
+/* ---- tables ---- */
+.tablewrap { overflow-x: auto; margin: 22px 0; border: 1px solid var(--hair); border-radius: 10px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 0.86rem; }
+th, td { padding: 8px 14px; text-align: right; white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+thead th {
+  font-family: "IBM Plex Mono", monospace; font-weight: 500; font-size: 0.72rem;
+  letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-dim);
+  border-bottom: 1px solid var(--hair-strong); background: var(--surface-2);
+  position: sticky; top: 0;
+}
+tbody td { border-bottom: 1px solid var(--hair); font-variant-numeric: tabular-nums; }
+tbody tr:last-child td { border-bottom: none; }
+tbody td.n { font-family: "IBM Plex Mono", monospace; }
+tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 45%, transparent); }
+td .win { color: var(--accent-ink); font-weight: 600; }
+td .best { background: var(--accent-soft); border-radius: 4px; padding: 1px 6px; font-family: "IBM Plex Mono", monospace; }
+caption { caption-side: bottom; padding: 10px 14px; font-size: 0.78rem; color: var(--ink-dim); text-align: left; }
+
+/* ---- charts ---- */
+figure { margin: 26px 0; }
+.chartcard {
+  background: var(--surface); border: 1px solid var(--hair); border-radius: 12px;
+  padding: 20px 18px 12px; box-shadow: var(--shadow); overflow-x: auto;
+}
+.chartcard h3 { font-size: 0.98rem; margin-bottom: 2px; }
+.chartcard .csub { font-size: 0.82rem; color: var(--ink-dim); margin-bottom: 14px; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; font-size: 0.78rem; color: var(--ink-dim); font-family: "IBM Plex Mono", monospace; }
+.legend i { display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+svg { display: block; max-width: 100%; height: auto; }
+svg text { font-family: "IBM Plex Mono", monospace; fill: var(--ink-dim); }
+.axis line, .axis path { stroke: var(--hair); }
+.gridline { stroke: var(--hair); stroke-dasharray: 2 3; }
+
+ul.tight { margin: 0 0 1rem; padding-left: 1.15rem; }
+ul.tight li { margin-bottom: 0.4rem; max-width: 64ch; }
+
+hr { border: none; border-top: 1px solid var(--hair); margin: 0; }
+
+footer { margin-top: 72px; padding-top: 22px; border-top: 1px solid var(--hair); font-size: 0.82rem; color: var(--ink-dim); }
+footer code { font-size: 0.8em; }
+
+.themebtn {
+  position: fixed; top: 14px; right: 14px; z-index: 20;
+  font-family: "IBM Plex Mono", monospace; font-size: 0.7rem; letter-spacing: 0.08em;
+  background: var(--surface); color: var(--ink-dim); border: 1px solid var(--hair);
+  border-radius: 999px; padding: 6px 12px; cursor: pointer;
+}
+.themebtn:hover { color: var(--ink); border-color: var(--hair-strong); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<button class="themebtn" id="themebtn" type="button" aria-label="Toggle colour theme">◑ theme</button>
+
+<div class="wrap">
+
+<header>
+  <div class="kicker">Inference benchmark · single GB10 · 2026-08-28</div>
+  <h1>Qwen3.8-27B-Uncensored on DGX Spark</h1>
+  <p class="lede">What actually serves this model on one GB10: FP8 vs BF16, MTP speculative
+  decoding swept 0&ndash;4 draft tokens, and context length pushed from 4K to the full 262K.</p>
+  <div class="meta">
+    <span>orcarouter/Qwen3.8-27B-Uncensored-FP8</span>
+    <span>vLLM 0.24.0 &middot; NGC 26.07</span>
+    <span>GB10 &middot; 128 GB unified &middot; sm_121</span>
+    <span>43 runs + vision A/B &middot; ~8 h wall</span>
+  </div>
+</header>
+
+<div class="kpis">
+  <div class="kpi">
+    <div class="label">Peak throughput</div>
+    <div class="value">183<span class="unit"> tok/s</span></div>
+    <div class="sub">FP8, MTP&nbsp;2, 32 concurrent</div>
+  </div>
+  <div class="kpi">
+    <div class="label">Single-user decode</div>
+    <div class="value">12.3<span class="unit"> tok/s</span></div>
+    <div class="sub">FP8, MTP&nbsp;3 &middot; 1.7&times; vs no MTP</div>
+  </div>
+  <div class="kpi">
+    <div class="label">FP8 vs BF16</div>
+    <div class="value">1.4&ndash;1.9&times;</div>
+    <div class="sub">FP8 faster on every workload</div>
+  </div>
+  <div class="kpi">
+    <div class="label">TTFT @ 110K prompt</div>
+    <div class="value">117<span class="unit"> s</span></div>
+    <div class="sub">prefill dominates at long context</div>
+  </div>
+</div>
+
+<section>
+  <div class="eyebrow">The verdict</div>
+  <h2>Serve it FP8 with MTP&nbsp;2, cap context at 16&ndash;32K</h2>
+  <div class="prose">
+    <p>On a single GB10 this model is <strong>memory-bandwidth bound</strong>, and every result
+    follows from that. The winning configuration:</p>
+    <ul class="tight">
+      <li><strong>FP8 over BF16, always.</strong> 28&nbsp;GB of weights instead of 50&nbsp;GB means
+      fewer bytes moved per token. FP8 is 1.36&ndash;1.93&times; faster than BF16 at matched
+      settings &mdash; the gap is widest on prompt-heavy work and narrows only when MTP lets
+      BF16 borrow idle compute.</li>
+      <li><strong>MTP is the single biggest lever</strong> &mdash; up to 1.7&times; (FP8) or 2.3&times;
+      (BF16) for free. Best draft depth: <strong>2 tokens</strong> for batched FP8,
+      <strong>3</strong> for single-stream FP8, <strong>4</strong> for BF16. Beyond that,
+      acceptance rate falls faster than acceptance length rises and throughput regresses.</li>
+      <li><strong>Context is cheap on memory, expensive on latency.</strong> The KV cache pool
+      never binds (65&ndash;71&nbsp;GiB, still 7.7&times; concurrency at 262K). But decode
+      throughput halves by 32K and time-to-first-token climbs to <strong>117&nbsp;s</strong> on a
+      110K-token prompt. Keep <code>max-model-len</code> at 16&ndash;32K unless you genuinely need more.</li>
+      <li><strong>Keep the vision tower.</strong> A separate A/B shows loading it costs ~3&nbsp;GB
+      and a one-time ~2.5&nbsp;min boot, with no text-throughput hit &mdash; and OCR reads a full
+      invoice image in 6&ndash;7&nbsp;s. Only add <code>--language-model-only</code> if you need the
+      memory back.</li>
+    </ul>
+  </div>
+  <div class="note">
+    <span class="h">Practical default</span>
+    <code>--kv-cache-dtype fp8 --speculative-config '{"method":"mtp","num_speculative_tokens":2}'
+    --max-model-len 32768 --gpu-memory-utilization 0.65 --limit-mm-per-prompt '{"image":1,"video":0}'</code>
+    &nbsp;&rarr;&nbsp; ~180 tok/s aggregate at 32 concurrent users, ~12 tok/s for a single user,
+    OCR / vision available.
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Speculative decoding</div>
+  <h2>MTP draft-token sweep</h2>
+  <div class="prose">
+    <p>The model ships a Multi-Token Prediction head. vLLM runs it as the draft model and
+    verifies <span class="num">N</span> speculative tokens per step. More draft tokens raise the
+    <em>acceptance length</em> (tokens landed per verify) but lower the <em>acceptance rate</em>
+    (fraction of drafts kept), and verification itself costs compute. Throughput peaks where those
+    curves cross &mdash; N&nbsp;=&nbsp;2 for batched FP8.</p>
+  </div>
+
+  <figure>
+    <div class="chartcard">
+      <h3>Output throughput vs draft tokens &mdash; FP8</h3>
+      <div class="csub">tokens/s, by workload. 0 = MTP disabled.</div>
+      <div id="chart-mtp-fp8"></div>
+      <div class="legend" id="legend-mtp"></div>
+    </div>
+  </figure>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th>Workload</th><th>conc</th><th>off</th><th>N=1</th><th>N=2</th><th>N=3</th><th>N=4</th>
+        <th>best N</th><th>MTP gain</th>
+      </tr></thead>
+      <tbody id="tbody-mtp-fp8"></tbody>
+      <caption>FP8. Output tok/s. &ldquo;MTP gain&rdquo; = best N vs MTP&nbsp;off.</caption>
+    </table>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th>FP8 config</th><th>accept&nbsp;len</th><th>accept&nbsp;rate</th>
+        <th>pos&nbsp;0</th><th>pos&nbsp;1</th><th>pos&nbsp;2</th><th>pos&nbsp;3</th>
+      </tr></thead>
+      <tbody id="tbody-accept"></tbody>
+      <caption>Per-position acceptance, <code>batch8_balanced</code>. Position 0 is the first
+      drafted token; deeper positions are accepted only if all shallower ones were.</caption>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Precision</div>
+  <h2>FP8 vs BF16</h2>
+  <div class="prose">
+    <p>Same model, same abliteration, two checkpoints: block-FP8 (E4M3, 28&nbsp;GB) and native
+    BF16 (50&nbsp;GB). Each swept over MTP depth; the bars show each precision at its own best
+    draft setting per workload.</p>
+  </div>
+
+  <figure>
+    <div class="chartcard">
+      <h3>Best-case throughput by precision</h3>
+      <div class="csub">tokens/s at each precision&rsquo;s optimal MTP depth</div>
+      <div id="chart-vs"></div>
+      <div class="legend">
+        <span><i style="background:var(--accent)"></i>FP8</span>
+        <span><i style="background:var(--blue)"></i>BF16</span>
+      </div>
+    </div>
+  </figure>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th>Workload</th><th>conc</th><th>FP8 best</th><th>BF16 best</th><th>FP8 / BF16</th>
+      </tr></thead>
+      <tbody id="tbody-vs"></tbody>
+      <caption>Output tok/s, each at its optimal MTP depth (shown in parentheses).</caption>
+    </table>
+  </div>
+
+  <div class="note">
+    <span class="h">Why FP8 wins here</span>
+    The DGX Spark's LPDDR5x delivers a fraction of an H100's HBM bandwidth, so decode is gated on
+    moving weights, not on math. Halving weight bytes with FP8 buys a near-linear speedup. BF16
+    also loses KV-cache room to its larger weights &mdash; ~29&nbsp;GiB / 13&times; concurrency vs
+    FP8&rsquo;s 46&ndash;64&nbsp;GiB / 40&times;.
+  </div>
+  <div class="note warn">
+    <span class="h">Caveat</span>
+    The checkpoint carries no <code>k_scale</code>/<code>v_scale</code>, so the FP8 KV cache runs
+    with a scaling factor of 1.0 &mdash; possible minor accuracy impact not measured here. This
+    benchmark measures throughput and latency only, not output quality.
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Context length</div>
+  <h2>Scaling to 262K</h2>
+  <div class="prose">
+    <p>FP8 with MTP&nbsp;3, one server per context size, each fed a prompt at ~45% of its window.
+    Throughput is flat to 16K, then decays as the growing KV cache adds bandwidth pressure per
+    decode step. The sharper cost is prefill latency.</p>
+  </div>
+
+  <figure>
+    <div class="chartcard">
+      <h3>Throughput and time-to-first-token vs context</h3>
+      <div class="csub">bars: output tok/s (left) &middot; line: TTFT p50 seconds (right, log)</div>
+      <div id="chart-ctx"></div>
+      <div class="legend">
+        <span><i style="background:var(--accent)"></i>output tok/s</span>
+        <span><i style="background:var(--amber)"></i>TTFT p50 (s)</span>
+      </div>
+    </div>
+  </figure>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th>Context</th><th>prompt</th><th>conc</th><th>out&nbsp;tok/s</th><th>TTFT&nbsp;p50</th>
+        <th>KV pool</th><th>KV tokens</th><th>max&nbsp;conc</th><th>load</th>
+      </tr></thead>
+      <tbody id="tbody-ctx"></tbody>
+      <caption>KV pool / max-concurrency are vLLM&rsquo;s own startup estimates. &ldquo;load&rdquo;
+      is model weight-load wall time.</caption>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Vision</div>
+  <h2>The vision tower is nearly free</h2>
+  <div class="prose">
+    <p>This is a vision-language checkpoint. The benchmark ran text-only with
+    <code>--language-model-only</code>. A separate A/B at the tuned 16K config &mdash;
+    tower loaded vs skipped &mdash; shows keeping it costs almost nothing:</p>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th></th><th><code>--language-model-only</code></th><th>vision loaded</th><th>&Delta;</th>
+      </tr></thead>
+      <tbody id="tbody-vision"></tbody>
+      <caption>16K &middot; MTP&nbsp;2 &middot; FP8 KV &middot; <code>gpu-memory-utilization 0.65</code>.
+      Text tok/s differences are within run-to-run noise (~&plusmn;5%).</caption>
+    </table>
+  </div>
+
+  <div class="note">
+    <span class="h">OCR verified</span>
+    A 640&times;400 invoice image &mdash; all four text lines transcribed verbatim
+    (<code>#2026-0842</code>, <code>EUR&nbsp;1,337.00</code>, <code>2026-09-15</code>,
+    <code>GB10-QWEN-BENCH</code>) plus both shapes and colours, in <strong>6&ndash;7.5&nbsp;s</strong>.
+    The image cost only ~250 context tokens. A full-page scan at higher resolution costs
+    far more &mdash; cap it with <code>--mm-processor-kwargs '{"max_pixels": ...}'</code>.
+  </div>
+  <div class="prose">
+    <p><strong>Verdict:</strong> drop <code>--language-model-only</code> unless you need the
+    ~3&nbsp;GB back or the faster boot. It adds a one-time ~2.5&nbsp;min to the first startup
+    (vision-encoder compile, then cached) and no measurable text-throughput cost.</p>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Environment</div>
+  <h2>Setup &amp; gotchas</h2>
+  <div class="prose">
+    <ul class="tight">
+      <li><strong>Model.</strong> <code>orcarouter/Qwen3.8-27B-Uncensored-FP8</code> &mdash; 27.8B,
+      block-FP8 E4M3, hybrid attention (16 full + 48 Gated-DeltaNet linear layers), MTP head,
+      262K native context. The 43 sweep runs used <code>--language-model-only</code>; the vision
+      A/B above measures the tower loaded.</li>
+      <li><strong>Server.</strong> <code>nvcr.io/nvidia/vllm:26.07-py3</code> (vLLM 0.24.0,
+      CUDA 13.3, arm64). <code>transformers</code> 5.6.1 in the image is fine &mdash; vLLM uses its
+      own <code>qwen3_5</code> implementation.</li>
+      <li><strong>DeepGEMM must be off.</strong> <code>VLLM_USE_DEEP_GEMM=0</code> is mandatory:
+      its UE8M0 FP8 path asserts <code>Unknown recipe</code> during kernel warmup on sm_121.
+      vLLM falls back to CUTLASS block-scaled FP8.</li>
+      <li><strong>MTP flag.</strong> <code>--speculative-config '{"method":"mtp",...}'</code>.
+      The old <code>--num-speculative-tokens</code> is gone in 0.24.0.</li>
+      <li><strong>Unified memory.</strong> <code>--gpu-memory-utilization</code> carves from the
+      whole 128&nbsp;GB pool. At 0.65, <code>free</code> shows ~87&nbsp;GB used the moment the server
+      is ready; context runs at 0.80&ndash;0.85 peaked at 105&ndash;114&nbsp;GB.
+      <code>nvidia-smi</code> reports <code>N/A</code> for all GPU memory on this part &mdash;
+      the harness reads <code>free -m</code>.</li>
+      <li><strong>Weight load.</strong> FP8 ~28&nbsp;GiB in 110&ndash;180&nbsp;s; BF16 ~50&nbsp;GiB
+      in 290&ndash;390&nbsp;s. A mounted <code>VLLM_CACHE_ROOT</code> cuts recompilation on repeat starts.</li>
+      <li><strong>One transient failure.</strong> <code>FP8 / MTP&nbsp;4 / 32-concurrent</code>
+      failed once (all requests, 0 output, no server error logged); re-ran clean at 177.7 tok/s.
+      Not reproduced.</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Appendix</div>
+  <h2>All 43 runs</h2>
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th>config</th><th>workload</th><th>model</th><th>N</th><th>conc</th>
+        <th>out tok/s</th><th>total tok/s</th><th>TTFT p50 ms</th><th>TPOT ms</th>
+        <th>accept len</th><th>mem peak MB</th>
+      </tr></thead>
+      <tbody id="tbody-all"></tbody>
+    </table>
+  </div>
+</section>
+
+<footer>
+  <p>Harness: <code>common/bench/{run.py, report.py}</code> +
+  <code>models/qwen3.8-27b-fp8/bench/matrix.yaml</code> &mdash; one container per config,
+  <code>vllm bench serve</code> per workload, incremental <code>summary.csv</code>.
+  Raw JSON and per-config server logs in
+  <code>models/qwen3.8-27b-fp8/bench/results/overnight_20260827_191752/</code>.
+  Regenerate: <code>python3 common/bench/report.py &lt;dir&gt;</code>.</p>
+  <p>Flash-Next family (<code>qwen4_exp</code>, ~180B MoE, ~186&nbsp;GB) excluded &mdash; exceeds
+  128&nbsp;GB, needs a day-0 x86 vLLM image and TP&nbsp;&ge;&nbsp;8.</p>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- theme toggle ----------
+  var KEY = "gb10-report-theme";
+  var root = document.documentElement;
+  try {
+    var saved = localStorage.getItem(KEY);
+    if (saved === "light" || saved === "dark") root.setAttribute("data-theme", saved);
+  } catch (e) {}
+  document.getElementById("themebtn").addEventListener("click", function () {
+    var cur = root.getAttribute("data-theme");
+    if (!cur) {
+      cur = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    }
+    var next = cur === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem(KEY, next); } catch (e) {}
+    drawAll();
+  });
+
+  // ---------- data ----------
+  var SPEC = [0, 1, 2, 3, 4];
+  var MTP_FP8 = {
+    single_stream:   { conc: 1,  tok: [7.3, 10.4, 11.8, 12.3, 11.7] },
+    batch8_balanced: { conc: 8,  tok: [50.3, 69.8, 78.9, 79.1, 72.1] },
+    codegen_decode:  { conc: 8,  tok: [50.7, 74.1, 88.4, 81.4, 79.2] },
+    saturate32:      { conc: 32, tok: [150.6, 176.3, 183.1, 181.1, 177.7] }
+  };
+  var ACCEPT = [ // batch8_balanced, per spec: len, rate%, pos0..3 (%)
+    { n: 1, len: 1.77, rate: 77.2, pos: [77.2, null, null, null] },
+    { n: 2, len: 2.38, rate: 68.8, pos: [77.0, 60.7, null, null] },
+    { n: 3, len: 2.73, rate: 57.6, pos: [73.0, 55.6, 44.1, null] },
+    { n: 4, len: 3.04, rate: 51.1, pos: [71.0, 53.3, 43.3, 36.8] }
+  ];
+  var VS = [ // workload, conc, fp8 [tok,N], bf16 [tok,N]
+    { w: "single_stream",   c: 1,  fp8: [12.3, 3], bf16: [8.6, 4] },
+    { w: "batch8_balanced", c: 8,  fp8: [79.1, 3], bf16: [52.9, 4] },
+    { w: "codegen_decode",  c: 8,  fp8: [88.4, 2], bf16: [52.0, 4] },
+    { w: "saturate32",      c: 32, fp8: [183.1, 2], bf16: [133.4, 3] }
+  ];
+  var VS_MATCHED = [ // workload -> {n: [fp8, bf16]}
+    ["single_stream",   { 0:[7.3,3.8], 2:[11.8,6.7], 3:[12.3,7.4], 4:[11.7,8.6] }],
+    ["batch8_balanced", { 0:[50.3,27.5], 2:[78.9,43.5], 3:[79.1,43.2], 4:[72.1,52.9] }],
+    ["codegen_decode",  { 0:[50.7,27.6], 2:[88.4,47.8], 3:[81.4,50.7], 4:[79.2,52.0] }],
+    ["saturate32",      { 0:[150.6,81.4], 2:[183.1,108.8], 3:[181.1,133.4], 4:[177.7,118.2] }]
+  ];
+  var CTX = [
+    { ctx: "4K",   prompt: 1800,   conc: 8, tok: 57.6, ttft: 6.4,   kv: 64.2, kvt: "337K",  mc: 82,  load: 138 },
+    { ctx: "8K",   prompt: 3600,   conc: 8, tok: 61.1, ttft: 7.5,   kv: 64.5, kvt: "565K",  mc: 69,  load: 149 },
+    { ctx: "16K",  prompt: 7200,   conc: 6, tok: 58.0, ttft: 13.6,  kv: 64.4, kvt: "884K",  mc: 54,  load: 132 },
+    { ctx: "32K",  prompt: 14000,  conc: 4, tok: 36.8, ttft: 15.7,  kv: 64.5, kvt: "1.23M", mc: 38,  load: 156 },
+    { ctx: "64K",  prompt: 28000,  conc: 3, tok: 22.6, ttft: 32.9,  kv: 64.4, kvt: "1.53M", mc: 23,  load: 137 },
+    { ctx: "128K", prompt: 56000,  conc: 2, tok: 25.0, ttft: 72.3,  kv: 70.5, kvt: "1.89M", mc: 15,  load: 151 },
+    { ctx: "256K", prompt: 110000, conc: 1, tok: 12.9, ttft: 117.2, kv: 70.6, kvt: "2.03M", mc: 8,   load: 153 }
+  ];
+  var VISION = [ // metric, text-only, vision-loaded, delta-string
+    ["weight load",          "28.08 GiB",  "28.95 GiB",  "+0.9 GiB"],
+    ["startup wall",         "226 s",      "387 s",      "+161 s (one-time)"],
+    ["KV cache pool",        "46.2 GiB",   "45.6 GiB",   "−1.3%"],
+    ["KV cache tokens",      "729k",       "719k",       "−10k"],
+    ["max concurrency @16K", "44.5×", "43.9×", "~same"],
+    ["unified mem (used)",   "86.9 GB",    "90.1 GB",    "+3.2 GB"],
+    ["text tok/s — 1 / 8 / 32 conc", "12.8 / 82 / 194", "12.4 / 87 / 202", "noise"]
+  ];
+  var ALL = [
+    ["fp8_spec_off","single_stream","fp8",0,1,7.3,11.3,449,137.4,0.00,88291],
+    ["fp8_spec_off","batch8_balanced","fp8",0,8,50.3,103.2,3625,155.2,0.00,89077],
+    ["fp8_spec_off","codegen_decode","fp8",0,8,50.7,64.0,4176,156.9,0.00,89822],
+    ["fp8_spec_off","saturate32","fp8",0,32,150.6,308.9,4858,204.5,0.00,89637],
+    ["fp8_spec_1","single_stream","fp8",1,1,10.4,16.1,552,96.0,1.69,92138],
+    ["fp8_spec_1","batch8_balanced","fp8",1,8,69.8,143.2,1791,104.5,1.77,91746],
+    ["fp8_spec_1","codegen_decode","fp8",1,8,74.1,93.5,4760,100.3,1.79,91997],
+    ["fp8_spec_1","saturate32","fp8",1,32,176.3,361.6,2835,156.5,1.78,91697],
+    ["fp8_spec_2","single_stream","fp8",2,1,11.8,18.2,673,84.5,2.13,93321],
+    ["fp8_spec_2","batch8_balanced","fp8",2,8,78.9,161.9,1641,86.5,2.38,92836],
+    ["fp8_spec_2","codegen_decode","fp8",2,8,88.4,111.6,5655,81.4,2.45,93951],
+    ["fp8_spec_2","saturate32","fp8",2,32,183.1,375.5,4235,143.1,2.33,90485],
+    ["fp8_spec_3","single_stream","fp8",3,1,12.3,19.1,688,80.5,2.46,89392],
+    ["fp8_spec_3","batch8_balanced","fp8",3,8,79.1,162.2,1922,82.2,2.73,89845],
+    ["fp8_spec_3","codegen_decode","fp8",3,8,81.4,102.8,5704,75.0,2.93,89833],
+    ["fp8_spec_3","saturate32","fp8",3,32,181.1,371.6,4331,138.1,2.72,90125],
+    ["fp8_spec_4","single_stream","fp8",4,1,11.7,18.1,742,85.2,2.55,89283],
+    ["fp8_spec_4","batch8_balanced","fp8",4,8,72.1,147.9,2260,81.5,3.04,90037],
+    ["fp8_spec_4","codegen_decode","fp8",4,8,79.2,100.0,4994,80.5,3.04,89923],
+    ["fp8_spec_4","saturate32","fp8",4,32,177.7,364.5,2969,136.6,2.94,89666],
+    ["fp8_ctx_4k","ctx4k_load","fp8",3,8,57.6,324.2,6413,92.0,2.73,108260],
+    ["fp8_ctx_8k","ctx8k_load","fp8",3,8,61.1,339.9,7511,96.0,2.61,108510],
+    ["fp8_ctx_16k","ctx16k_load","fp8",3,6,58.0,320.9,13580,79.3,2.99,108100],
+    ["fp8_ctx_32k","ctx32k_load","fp8",3,4,36.8,208.9,15708,84.9,2.63,107839],
+    ["fp8_ctx_64k","ctx64k_load","fp8",3,3,22.6,181.0,32906,93.9,2.38,107885],
+    ["fp8_ctx_128k","ctx128k_load","fp8",3,2,25.0,199.9,72304,70.2,3.20,114376],
+    ["fp8_ctx_256k","ctx256k_load","fp8",3,1,12.9,189.8,117184,63.1,3.55,112139],
+    ["bf16_spec_off","single_stream","bf16",0,1,3.8,5.9,613,264.6,0.00,92273],
+    ["bf16_spec_off","batch8_balanced","bf16",0,8,27.5,56.4,5752,285.7,0.00,92786],
+    ["bf16_spec_off","codegen_decode","bf16",0,8,27.6,34.9,6807,288.2,0.00,92839],
+    ["bf16_spec_off","saturate32","bf16",0,32,81.4,167.0,8503,379.3,0.00,92936],
+    ["bf16_spec_2","single_stream","bf16",2,1,6.7,10.4,920,148.8,2.12,94142],
+    ["bf16_spec_2","batch8_balanced","bf16",2,8,43.5,89.1,2910,158.5,2.31,94534],
+    ["bf16_spec_2","codegen_decode","bf16",2,8,47.8,60.3,7571,149.6,2.45,94836],
+    ["bf16_spec_2","saturate32","bf16",2,32,108.8,223.1,4746,245.6,2.32,94727],
+    ["bf16_spec_3","single_stream","bf16",3,1,7.4,11.5,721,133.9,2.53,94748],
+    ["bf16_spec_3","batch8_balanced","bf16",3,8,43.2,88.6,2691,147.9,2.66,95386],
+    ["bf16_spec_3","codegen_decode","bf16",3,8,50.7,64.1,7742,132.5,2.69,95721],
+    ["bf16_spec_3","saturate32","bf16",3,32,133.4,273.6,3577,191.9,2.83,94780],
+    ["bf16_spec_4","single_stream","bf16",4,1,8.6,13.3,868,116.0,2.70,93240],
+    ["bf16_spec_4","batch8_balanced","bf16",4,8,52.9,108.6,2954,119.6,3.00,93485],
+    ["bf16_spec_4","codegen_decode","bf16",4,8,52.0,65.7,6601,128.3,2.80,93893],
+    ["bf16_spec_4","saturate32","bf16",4,32,118.2,242.4,16398,197.1,2.97,95049]
+  ];
+
+  var WNAME = {
+    single_stream: "single-stream", batch8_balanced: "batch ×8",
+    codegen_decode: "code-gen 4K-out", saturate32: "saturated ×32"
+  };
+  var WSHORT = {
+    single_stream: "1-stream", batch8_balanced: "batch8",
+    codegen_decode: "codegen", saturate32: "sat×32"
+  };
+  var SERIES = ["single_stream", "batch8_balanced", "codegen_decode", "saturate32"];
+
+  function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+  function el(tag, attrs, kids) {
+    var e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    (kids || []).forEach(function (c) { e.appendChild(c); });
+    return e;
+  }
+  function txt(s) { return document.createTextNode(s); }
+
+  // ---------- line chart: MTP sweep FP8 ----------
+  function drawMtpFp8() {
+    var host = document.getElementById("chart-mtp-fp8");
+    host.innerHTML = "";
+    var W = Math.max(320, Math.min(760, host.clientWidth || 700)), H = 300;
+    var m = { t: 14, r: 16, b: 34, l: 44 };
+    var iw = W - m.l - m.r, ih = H - m.t - m.b;
+    var maxY = 200;
+    var colors = [css("--ink-faint"), css("--blue"), css("--accent"), css("--accent-ink"), css("--amber")];
+    var svg = el("svg", { viewBox: "0 0 " + W + " " + H, width: W, height: H, role: "img",
+      "aria-label": "FP8 output throughput versus MTP draft tokens for four workloads" });
+
+    for (var gy = 0; gy <= 200; gy += 50) {
+      var y = m.t + ih - (gy / maxY) * ih;
+      svg.appendChild(el("line", { class: "gridline", x1: m.l, y1: y, x2: m.l + iw, y2: y }));
+      svg.appendChild(el("text", { x: m.l - 8, y: y + 3.5, "text-anchor": "end", "font-size": 10 }, [txt(gy)]));
+    }
+    SPEC.forEach(function (s, i) {
+      var x = m.l + (i / (SPEC.length - 1)) * iw;
+      svg.appendChild(el("text", { x: x, y: m.t + ih + 16, "text-anchor": "middle", "font-size": 10 },
+        [txt(s === 0 ? "off" : s)]));
+    });
+    svg.appendChild(el("text", { x: m.l + iw / 2, y: H - 2, "text-anchor": "middle", "font-size": 10.5 },
+      [txt("draft tokens (N)")]));
+
+    SERIES.forEach(function (name, si) {
+      var d = MTP_FP8[name].tok, col = colors[si + 1];
+      var pts = d.map(function (v, i) {
+        return [m.l + (i / (SPEC.length - 1)) * iw, m.t + ih - (v / maxY) * ih];
+      });
+      svg.appendChild(el("polyline", { points: pts.map(function (p) { return p.join(","); }).join(" "),
+        fill: "none", stroke: col, "stroke-width": 2, "stroke-linejoin": "round" }));
+      pts.forEach(function (p, i) {
+        var best = d.indexOf(Math.max.apply(null, d)) === i;
+        svg.appendChild(el("circle", { cx: p[0], cy: p[1], r: best ? 4.5 : 3,
+          fill: best ? col : css("--surface"), stroke: col, "stroke-width": 2 }));
+      });
+    });
+    svg.appendChild(el("line", { class: "axis", x1: m.l, y1: m.t + ih, x2: m.l + iw, y2: m.t + ih, stroke: css("--hair-strong") }));
+    host.appendChild(svg);
+
+    var lg = document.getElementById("legend-mtp");
+    lg.innerHTML = "";
+    SERIES.forEach(function (name, si) {
+      var s = document.createElement("span");
+      s.innerHTML = '<i style="background:' + colors[si + 1] + '"></i>' + WNAME[name] +
+        " (c" + MTP_FP8[name].conc + ")";
+      lg.appendChild(s);
+    });
+  }
+
+  // ---------- grouped bars: FP8 vs BF16 ----------
+  function drawVs() {
+    var host = document.getElementById("chart-vs");
+    host.innerHTML = "";
+    var W = Math.max(320, Math.min(760, host.clientWidth || 700)), H = 300;
+    var m = { t: 14, r: 12, b: 46, l: 44 };
+    var iw = W - m.l - m.r, ih = H - m.t - m.b;
+    var maxY = 200;
+    var svg = el("svg", { viewBox: "0 0 " + W + " " + H, width: W, height: H, role: "img",
+      "aria-label": "FP8 versus BF16 best-case throughput by workload" });
+    for (var gy = 0; gy <= 200; gy += 50) {
+      var y = m.t + ih - (gy / maxY) * ih;
+      svg.appendChild(el("line", { class: "gridline", x1: m.l, y1: y, x2: m.l + iw, y2: y }));
+      svg.appendChild(el("text", { x: m.l - 8, y: y + 3.5, "text-anchor": "end", "font-size": 10 }, [txt(gy)]));
+    }
+    var bw = iw / VS.length;
+    VS.forEach(function (r, i) {
+      var cx = m.l + bw * i + bw / 2;
+      var pairs = [[r.fp8, css("--accent")], [r.bf16, css("--blue")]];
+      pairs.forEach(function (p, j) {
+        var val = p[0][0], h = (val / maxY) * ih;
+        var x = cx + (j === 0 ? -bw * 0.30 : bw * 0.02);
+        svg.appendChild(el("rect", { x: x, y: m.t + ih - h, width: bw * 0.28, height: h,
+          fill: p[1], rx: 2 }));
+        svg.appendChild(el("text", { x: x + bw * 0.14, y: m.t + ih - h - 5, "text-anchor": "middle",
+          "font-size": 9.5, fill: css("--ink-dim") }, [txt(val.toFixed(0))]));
+      });
+      var ratio = (r.fp8[0] / r.bf16[0]).toFixed(2);
+      svg.appendChild(el("text", { x: cx, y: m.t + ih + 16, "text-anchor": "middle", "font-size": 10 },
+        [txt(WSHORT[r.w])]));
+      svg.appendChild(el("text", { x: cx, y: m.t + ih + 30, "text-anchor": "middle", "font-size": 9.5,
+        fill: css("--accent-ink") }, [txt(ratio + "×")]));
+    });
+    svg.appendChild(el("line", { class: "axis", x1: m.l, y1: m.t + ih, x2: m.l + iw, y2: m.t + ih, stroke: css("--hair-strong") }));
+    host.appendChild(svg);
+  }
+
+  // ---------- combo: context scaling ----------
+  function drawCtx() {
+    var host = document.getElementById("chart-ctx");
+    host.innerHTML = "";
+    var W = Math.max(320, Math.min(760, host.clientWidth || 700)), H = 300;
+    var m = { t: 14, r: 44, b: 34, l: 40 };
+    var iw = W - m.l - m.r, ih = H - m.t - m.b;
+    var maxY = 70, maxT = 128; // tok/s ; ttft seconds (log2-ish scale via sqrt)
+    var svg = el("svg", { viewBox: "0 0 " + W + " " + H, width: W, height: H, role: "img",
+      "aria-label": "Throughput and time-to-first-token versus context length" });
+    for (var gy = 0; gy <= 60; gy += 20) {
+      var y = m.t + ih - (gy / maxY) * ih;
+      svg.appendChild(el("line", { class: "gridline", x1: m.l, y1: y, x2: m.l + iw, y2: y }));
+      svg.appendChild(el("text", { x: m.l - 7, y: y + 3.5, "text-anchor": "end", "font-size": 10 }, [txt(gy)]));
+    }
+    var bw = iw / CTX.length;
+    function tScale(s) { return Math.sqrt(s / maxT); } // compress the TTFT spread
+    CTX.forEach(function (r, i) {
+      var x = m.l + bw * i + bw * 0.2, w = bw * 0.6;
+      var h = (r.tok / maxY) * ih;
+      svg.appendChild(el("rect", { x: x, y: m.t + ih - h, width: w, height: h, fill: css("--accent"), rx: 2 }));
+      svg.appendChild(el("text", { x: x + w / 2, y: m.t + ih - h - 5, "text-anchor": "middle",
+        "font-size": 9, fill: css("--ink-dim") }, [txt(r.tok.toFixed(0))]));
+      svg.appendChild(el("text", { x: x + w / 2, y: m.t + ih + 15, "text-anchor": "middle", "font-size": 10 },
+        [txt(r.ctx)]));
+    });
+    var line = CTX.map(function (r, i) {
+      return [m.l + bw * i + bw / 2, m.t + ih - tScale(r.ttft) * ih];
+    });
+    svg.appendChild(el("polyline", { points: line.map(function (p) { return p.join(","); }).join(" "),
+      fill: "none", stroke: css("--amber"), "stroke-width": 2 }));
+    line.forEach(function (p, i) {
+      svg.appendChild(el("circle", { cx: p[0], cy: p[1], r: 3, fill: css("--amber") }));
+      svg.appendChild(el("text", { x: p[0], y: p[1] - 7, "text-anchor": "middle", "font-size": 9,
+        fill: css("--amber") }, [txt(CTX[i].ttft + "s")]));
+    });
+    svg.appendChild(el("line", { class: "axis", x1: m.l, y1: m.t + ih, x2: m.l + iw, y2: m.t + ih, stroke: css("--hair-strong") }));
+    host.appendChild(svg);
+  }
+
+  // ---------- tables ----------
+  function cell(v, cls) { var td = document.createElement("td"); if (cls) td.className = cls; td.textContent = v; return td; }
+  function row(cells) { var tr = document.createElement("tr"); cells.forEach(function (c) { tr.appendChild(c); }); return tr; }
+
+  function fillMtpFp8() {
+    var tb = document.getElementById("tbody-mtp-fp8");
+    SERIES.forEach(function (name) {
+      var d = MTP_FP8[name], mx = Math.max.apply(null, d.tok), bi = d.tok.indexOf(mx);
+      var cells = [cell(WNAME[name]), cell(d.conc, "n")];
+      d.tok.forEach(function (v, i) {
+        var td = cell(v.toFixed(1), "n");
+        if (i === bi) td.innerHTML = '<span class="best">' + v.toFixed(1) + "</span>";
+        cells.push(td);
+      });
+      cells.push(cell("N=" + SPEC[bi], "n"));
+      cells.push(cell((mx / d.tok[0]).toFixed(2) + "×", "n"));
+      tb.appendChild(row(cells));
+    });
+  }
+  function fillAccept() {
+    var tb = document.getElementById("tbody-accept");
+    ACCEPT.forEach(function (a) {
+      tb.appendChild(row([
+        cell("MTP " + a.n),
+        cell(a.len.toFixed(2), "n"),
+        cell(a.rate.toFixed(1) + "%", "n"),
+        cell(a.pos[0] == null ? "–" : a.pos[0].toFixed(0) + "%", "n"),
+        cell(a.pos[1] == null ? "–" : a.pos[1].toFixed(0) + "%", "n"),
+        cell(a.pos[2] == null ? "–" : a.pos[2].toFixed(0) + "%", "n"),
+        cell(a.pos[3] == null ? "–" : a.pos[3].toFixed(0) + "%", "n")
+      ]));
+    });
+  }
+  function fillVs() {
+    var tb = document.getElementById("tbody-vs");
+    VS.forEach(function (r) {
+      var ratio = r.fp8[0] / r.bf16[0];
+      tb.appendChild(row([
+        cell(WNAME[r.w]), cell(r.c, "n"),
+        cell(r.fp8[0].toFixed(1) + "  (N" + r.fp8[1] + ")", "n"),
+        cell(r.bf16[0].toFixed(1) + "  (N" + r.bf16[1] + ")", "n"),
+        (function () { var td = cell(""); td.className = "n";
+          td.innerHTML = '<span class="win">' + ratio.toFixed(2) + "×</span>"; return td; })()
+      ]));
+    });
+  }
+  function fillCtx() {
+    var tb = document.getElementById("tbody-ctx");
+    CTX.forEach(function (r) {
+      tb.appendChild(row([
+        cell(r.ctx), cell(r.prompt.toLocaleString(), "n"), cell(r.conc, "n"),
+        cell(r.tok.toFixed(1), "n"),
+        cell(r.ttft >= 60 ? (r.ttft).toFixed(0) + " s" : r.ttft.toFixed(1) + " s", "n"),
+        cell(r.kv.toFixed(1) + " GiB", "n"), cell(r.kvt, "n"),
+        cell(r.mc + "×", "n"), cell(r.load + " s", "n")
+      ]));
+    });
+  }
+  function fillVision() {
+    var tb = document.getElementById("tbody-vision");
+    if (!tb) return;
+    VISION.forEach(function (r) {
+      tb.appendChild(row([cell(r[0]), cell(r[1], "n"), cell(r[2], "n"),
+        (function () { var td = cell(""); td.className = "n";
+          td.innerHTML = '<span class="win">' + r[3] + "</span>"; return td; })()]));
+    });
+  }
+  function fillAll() {
+    var tb = document.getElementById("tbody-all");
+    ALL.forEach(function (r) {
+      var tr = document.createElement("tr");
+      tr.appendChild(cell(r[0]));
+      tr.appendChild(cell(r[1]));
+      tr.appendChild(cell(r[2]));
+      tr.appendChild(cell(r[3], "n"));
+      tr.appendChild(cell(r[4], "n"));
+      tr.appendChild(cell(r[5].toFixed(1), "n"));
+      tr.appendChild(cell(r[6].toFixed(1), "n"));
+      tr.appendChild(cell(r[7].toLocaleString(), "n"));
+      tr.appendChild(cell(r[8].toFixed(1), "n"));
+      tr.appendChild(cell(r[9].toFixed(2), "n"));
+      tr.appendChild(cell(r[10].toLocaleString(), "n"));
+      tb.appendChild(tr);
+    });
+  }
+
+  function drawAll() { drawMtpFp8(); drawVs(); drawCtx(); }
+
+  fillMtpFp8(); fillAccept(); fillVs(); fillCtx(); fillVision(); fillAll();
+  drawAll();
+  var rt;
+  addEventListener("resize", function () { clearTimeout(rt); rt = setTimeout(drawAll, 150); });
+})();
+</script>

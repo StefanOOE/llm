@@ -1,0 +1,20 @@
+# Secrets — real values live here; commit .env.example instead
+.env
+*.env.local
+
+# Python virtualenvs
+.hf-venv/
+.venv/
+venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Raw vLLM server stdout from bench runs — bulky, regenerable, distilled into
+# report.md / summary.csv. Keep the per-run JSON, not these.
+server*.log

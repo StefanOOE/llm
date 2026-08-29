@@ -63,7 +63,7 @@ def test_speed(api_url, api_key, model, prompt):
                         delta = choices[0].get("delta", {})
 
                         # Zeitpunkt des allerersten Deltas (auch Reasoning) = Ende Prefill
-                        has_any_content = delta.get("content") or delta.get("reasoning_content")
+                        has_any_content = delta.get("content") or delta.get("reasoning")
                         if first_byte_time is None and has_any_content:
                             first_byte_time = time.time() - start_time
 

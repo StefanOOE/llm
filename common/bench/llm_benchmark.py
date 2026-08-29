@@ -35,6 +35,7 @@ def test_speed(api_url, api_key, model, prompt):
     ttft = None
     first_byte_time = None
     chunk_count = 0
+    all_delta_count = 0
     usage = None
 
     try:
@@ -62,8 +63,14 @@ def test_speed(api_url, api_key, model, prompt):
                         delta = choices[0].get("delta", {})
 
                         # Zeitpunkt des allerersten Deltas (auch Reasoning) = Ende Prefill
-                        if first_byte_time is None and (delta.get("content") or delta.get("reasoning_content")):
+                        has_any_content = delta.get("content") or delta.get("reasoning_content")
+                        if first_byte_time is None and has_any_content:
                             first_byte_time = time.time() - start_time
+
+                        # Zählt alle Content-tragenden Chunks (Reasoning + sichtbar), für die
+                        # Schätzung des Bündelungsverhältnisses bei Speculative Decoding
+                        if has_any_content:
+                            all_delta_count += 1
 
                         # Erkennt den ersten Token mit echtem sichtbarem Textinhalt
                         if "content" in delta and delta["content"]:
@@ -100,6 +107,20 @@ def test_speed(api_url, api_key, model, prompt):
                 print(f"Antwortgeschwindigkeit (gesamt, exakt):    {speed:.2f} Tokens/Sekunde")
             else:
                 print("Antwortgeschwindigkeit (gesamt, exakt):    N/A")
+
+            # Schätzung nur für sichtbaren Text: die API liefert keine getrennte
+            # Reasoning-Tokenzahl, daher wird das Bündelungsverhältnis (echte
+            # Tokens pro Chunk) aus der Gesamtantwort auf die sichtbaren
+            # Content-Chunks übertragen (Annahme: ähnliches Verhältnis in
+            # Reasoning- und Content-Phase).
+            if all_delta_count > 0 and ttft is not None:
+                bundling_factor = completion_tokens / all_delta_count
+                estimated_visible_tokens = chunk_count * bundling_factor
+                visible_time = total_time - ttft
+                if visible_time > 0:
+                    visible_speed = estimated_visible_tokens / visible_time
+                    print(f"Antwortgeschwindigkeit (sichtbarer Text, geschätzt): {visible_speed:.2f} Tokens/Sekunde "
+                          f"[~{estimated_visible_tokens:.0f} Tokens, Näherung über Bündelungsverhältnis]")
         else:
             print("Kein 'usage'-Feld vom Server erhalten — Fallback auf Chunk-Zählung (ungenau bei Speculative Decoding):")
             generation_time = total_time - (ttft if ttft else 0)

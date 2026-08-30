@@ -41,6 +41,36 @@
   in any quant** (a 51B-param BF16 PLE n-gram table dominates). Exceeds the
   128 GB unified pool; needs a day-0 x86 vLLM image and TP ≥ 8.
 
+## 2026-08-30: tool-calling HTTP 500 fix + context bump to 65536
+
+A remote agent needing `tools` + >=64k context hit two independent bugs:
+
+- **Tool-calling always 500'd**: `cannot import name 'normalize_tool_choice'
+  from 'xgrammar'`. Root cause: base NGC `26.07-py3` ships `xgrammar==0.2.0`,
+  but vLLM 0.24.0's tool-calling path needs `normalize_tool_choice`, added in
+  xgrammar 0.2.4. Fixed with a `--no-deps` bump in a tiny derived image
+  (`docker/Dockerfile.xgrammar024`, built locally as
+  `vllm-qwen:26.07-xgrammar024`) so `transformers`/`torch` stay untouched.
+  `model.env` overrides `VLLM_IMAGE` to this tag. **Not registry-pullable** —
+  if the local Docker image cache ever loses it (`docker image prune`, fresh
+  host), rebuild with the command in the Dockerfile's header comment before
+  the next start; `preflight()` in `lib.sh` will otherwise try (and fail) to
+  `docker pull` a nonexistent remote tag.
+  `--tool-call-parser` was deliberately left at `qwen3_coder` (not switched to
+  `hermes` as first suggested) — that's the model card's documented format,
+  and the bug was xgrammar's import error, unrelated to parser choice.
+  Verified: a `tools`-bearing request now returns a clean `tool_calls` field
+  instead of 500.
+- **Context raised 16384 -> 65536**: the agent hard-requires >=64000. Native
+  `max_position_embeddings` is 262144 (config.json) — no YaRN needed, just
+  the flag. Sits between the already-benchmarked 32k/64k rows in
+  `model.env`'s context table; `GPU_MEM_UTIL`/`MAX_NUM_SEQS` untouched since
+  the 64k row already fit inside the 0.65 util budget.
+
+Both changes live in `model.env` (sourced fresh on every start by the
+systemd unit) — no `install-service` re-run was needed, and both survive a
+reboot as long as the local Docker image persists (see caveat above).
+
 ## Sources
 
 - Model card: <https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8>

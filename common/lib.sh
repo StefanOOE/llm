@@ -12,6 +12,20 @@
 #  e.g. a model whose optimal --moe-backend / --attention-backend was found
 #  by benchmarking, not read from the checkpoint. Unset -> no-op for models
 #  (like qwen3.8-27b-fp8) that don't need it.
+#
+#  RUNNER (optional, default "generate"): vLLM 0.24.0's `--runner`.
+#    generate  chat/completions model — the full flag set below
+#              (parsers, tool-choice, kv-cache-dtype, MTP, mm-limits).
+#    pooling   embedding model served at /v1/embeddings — a deliberately
+#              minimal flag set, none of the generate-only flags. Reads
+#              DTYPE and ENFORCE_EAGER; ignores MTP_TOKENS / KV_CACHE_DTYPE /
+#              MAX_NUM_SEQS / REASONING_PARSER / TOOL_CALL_PARSER / MM_* /
+#              LANGUAGE_MODEL_ONLY (a pooling model.env need not set them).
+#              CLS-pooling + L2-norm come from the model's own config
+#              (1_Pooling/, sentence_bert_config.json) — do not hand-set
+#              --pooler-config unless a test shows it's wrong.
+#  DTYPE (optional): passed as `--dtype` only when set and != "auto".
+#  ENFORCE_EAGER (optional, default 0): 1 adds `--enforce-eager`.
 # =============================================================================
 
 # -- docker (works with or without docker-group membership) --------------- #
@@ -37,19 +51,9 @@ lan_ip() {
 
 # -- assemble the two arg arrays into globals RUN_COMMON / VLLM_ARGS ------ #
 assemble_args() {
-  local spec=() vision=()
-  if [ "${MTP_TOKENS}" -gt 0 ]; then
-    spec=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_TOKENS}}")
-  fi
-  if [ "${LANGUAGE_MODEL_ONLY}" = "1" ]; then
-    vision=(--language-model-only)
-    VISION_DESC="off (--language-model-only)"
-  else
-    vision=(--limit-mm-per-prompt "{\"image\":${MM_IMAGE_LIMIT},\"video\":${MM_VIDEO_LIMIT}}")
-    [ -n "${MM_PROCESSOR_KWARGS:-}" ] && vision+=(--mm-processor-kwargs "${MM_PROCESSOR_KWARGS}")
-    VISION_DESC="on  (image<=${MM_IMAGE_LIMIT}, video<=${MM_VIDEO_LIMIT})"
-  fi
+  RUNNER="${RUNNER:-generate}"
 
+  # container-level flags — identical for every runner
   HEALTH_ARGS=(
     --health-cmd "curl -fsS -o /dev/null http://localhost:${PORT}/health || exit 1"
     --health-interval=30s --health-timeout=5s --health-retries=3
@@ -70,22 +74,55 @@ assemble_args() {
     "$VLLM_IMAGE"
   )
 
-  VLLM_ARGS=(
-    vllm serve "$MODEL"
-    --served-model-name "$SERVED_NAME"
-    --host "$HOST" --port "$PORT"
-    --api-key "$API_KEY"
-    --trust-remote-code
-    --max-model-len "$MAX_MODEL_LEN"
-    --max-num-seqs "$MAX_NUM_SEQS"
-    --gpu-memory-utilization "$GPU_MEM_UTIL"
-    --kv-cache-dtype "$KV_CACHE_DTYPE"
-    "${spec[@]}"
-    "${vision[@]}"
-    --reasoning-parser "$REASONING_PARSER"
-    --enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER"
-    --tensor-parallel-size 1
-  )
+  if [ "${RUNNER}" = "pooling" ]; then
+    # -- embedding / pooling model: no chat- or generate-only flags ------- #
+    local dtype=() eager=()
+    [ -n "${DTYPE:-}" ] && [ "${DTYPE}" != "auto" ] && dtype=(--dtype "${DTYPE}")
+    [ "${ENFORCE_EAGER:-0}" = "1" ] && eager=(--enforce-eager)
+    VLLM_ARGS=(
+      vllm serve "$MODEL"
+      --served-model-name "$SERVED_NAME"
+      --host "$HOST" --port "$PORT"
+      --api-key "$API_KEY"
+      --runner pooling
+      --max-model-len "$MAX_MODEL_LEN"
+      --gpu-memory-utilization "$GPU_MEM_UTIL"
+      "${dtype[@]}"
+      "${eager[@]}"
+    )
+    VISION_DESC="n/a (pooling runner)"
+  else
+    local spec=() vision=()
+    if [ "${MTP_TOKENS}" -gt 0 ]; then
+      spec=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_TOKENS}}")
+    fi
+    if [ "${LANGUAGE_MODEL_ONLY}" = "1" ]; then
+      vision=(--language-model-only)
+      VISION_DESC="off (--language-model-only)"
+    else
+      vision=(--limit-mm-per-prompt "{\"image\":${MM_IMAGE_LIMIT},\"video\":${MM_VIDEO_LIMIT}}")
+      [ -n "${MM_PROCESSOR_KWARGS:-}" ] && vision+=(--mm-processor-kwargs "${MM_PROCESSOR_KWARGS}")
+      VISION_DESC="on  (image<=${MM_IMAGE_LIMIT}, video<=${MM_VIDEO_LIMIT})"
+    fi
+
+    VLLM_ARGS=(
+      vllm serve "$MODEL"
+      --served-model-name "$SERVED_NAME"
+      --host "$HOST" --port "$PORT"
+      --api-key "$API_KEY"
+      --trust-remote-code
+      --max-model-len "$MAX_MODEL_LEN"
+      --max-num-seqs "$MAX_NUM_SEQS"
+      --gpu-memory-utilization "$GPU_MEM_UTIL"
+      --kv-cache-dtype "$KV_CACHE_DTYPE"
+      "${spec[@]}"
+      "${vision[@]}"
+      --reasoning-parser "$REASONING_PARSER"
+      --enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER"
+      --tensor-parallel-size 1
+    )
+  fi
+
   if [ -n "${EXTRA_VLLM_ARGS:-}" ]; then
     # shellcheck disable=SC2206  # intentional word-splitting of a flat flag list
     VLLM_ARGS+=( ${EXTRA_VLLM_ARGS} )
@@ -94,6 +131,25 @@ assemble_args() {
 
 banner() {
   local gb; gb=$(python3 -c "print(round(${GPU_MEM_UTIL}*${BOX_UNIFIED_MEM_GB}))" 2>/dev/null || echo "?")
+  if [ "${RUNNER:-generate}" = "pooling" ]; then
+    cat <<EOF
+==========================================================
+ ${SLUG}   [${1}]
+==========================================================
+  model        : ${MODEL}
+  image        : ${VLLM_IMAGE}
+  runner       : pooling   (embeddings — POST /v1/embeddings)
+  context      : ${MAX_MODEL_LEN} tokens
+  dtype        : ${DTYPE:-auto}
+  gpu mem util : ${GPU_MEM_UTIL}   (~${gb} GB of ${BOX_UNIFIED_MEM_GB} GB unified)
+  enforce eager: $( [ "${ENFORCE_EAGER:-0}" = "1" ] && echo yes || echo no )
+  extra args   : ${EXTRA_VLLM_ARGS:-(none)}
+  container    : ${CONTAINER}
+  endpoint     : http://${HOST}:${PORT}/v1   (served as '${SERVED_NAME}')
+==========================================================
+EOF
+    return
+  fi
   cat <<EOF
 ==========================================================
  ${SLUG}   [${1}]
@@ -115,6 +171,21 @@ EOF
 
 endpoint_block() {
   local ip; ip="$(lan_ip)"
+  if [ "${RUNNER:-generate}" = "pooling" ]; then
+    cat <<EOF
+==========================================================
+ OpenAI-compatible API${1:+  ($1)}
+==========================================================
+  base URL (local)  : http://localhost:${PORT}/v1
+$( [ -n "$ip" ] && echo "  base URL (network): http://${ip}:${PORT}/v1" )
+  embeddings        : POST  <base URL>/embeddings
+  model id          : ${SERVED_NAME}
+  auth              : header  'Authorization: Bearer <API_KEY>'   (required)
+  health            : GET   http://localhost:${PORT}/health   (no auth)
+==========================================================
+EOF
+    return
+  fi
   cat <<EOF
 ==========================================================
  OpenAI-compatible API${1:+  ($1)}
@@ -297,7 +368,19 @@ main() {
       wait_health || exit 1
       echo
       endpoint_block
-      cat <<EOF
+      if [ "${RUNNER}" = "pooling" ]; then
+        cat <<EOF
+
+  test:        curl -s http://localhost:${PORT}/v1/embeddings \\
+                 -H 'Content-Type: application/json' -H "Authorization: Bearer \$API_KEY" \\
+                 -d '{"model":"${SERVED_NAME}","input":["Hallo Welt","the quick brown fox"]}'
+  pooling/norm: read from the model config (1_Pooling/, sentence_bert_config.json)
+
+  persistent across reboots:   ${INVOKED_AS} install-service
+  logs / stop / status:        ${INVOKED_AS} <that subcommand>
+EOF
+      else
+        cat <<EOF
 
   text test:   curl -s http://localhost:${PORT}/v1/chat/completions \\
                  -H 'Content-Type: application/json' -H "Authorization: Bearer \$API_KEY" \\
@@ -308,6 +391,7 @@ main() {
   persistent across reboots:   ${INVOKED_AS} install-service
   logs / stop / status:        ${INVOKED_AS} <that subcommand>
 EOF
+      fi
       ;;
     *)
       echo "usage: serve <model-dir> [start|run|stop|logs|status|install-service|uninstall-service]" >&2

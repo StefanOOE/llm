@@ -4,7 +4,8 @@ vLLM serving + benchmark harness for LLMs on a single **NVIDIA GB10**
 (DGX Spark, 128 GB unified LPDDR5x, sm_121, CUDA 13).
 
 One generic launcher in `common/`, one directory per model in `models/`.
-Adding a model = a new `models/<slug>/` with a `model.env`.
+Adding a model = a new `models/<slug>/` with a `model.env` (an embedding model
+just adds `RUNNER=pooling` — see `bge-m3/`).
 
 ```
 common/
@@ -23,13 +24,17 @@ models/
 │       ├── matrix.yaml   the sweep (configs, workloads, suites)
 │       ├── ocr_test.png
 │       └── results/      per-run JSON, server logs, summary.csv, report.md/html, plots
-└── gpt-oss-120b/       native MXFP4 text MoE, Harmony format   (scaffolded; benchmark pending)
-    ├── model.env       same layout as above, all knobs marked PENDING BENCHMARK
-    ├── notes.md         model-card facts, SM121 MXFP4 "null Harmony token" bug writeup
-    ├── serve            thin wrapper -> common/serve.sh with this dir
-    └── bench/
-        ├── matrix.yaml   the sweep (configs, workloads, suites)
-        └── results/      empty until the sweep runs
+├── gpt-oss-120b/       native MXFP4 text MoE, Harmony format   (scaffolded; benchmark pending)
+│   ├── model.env       same layout as above, all knobs marked PENDING BENCHMARK
+│   ├── notes.md         model-card facts, SM121 MXFP4 "null Harmony token" bug writeup
+│   ├── serve            thin wrapper -> common/serve.sh with this dir
+│   └── bench/
+│       ├── matrix.yaml   the sweep (configs, workloads, suites)
+│       └── results/      empty until the sweep runs
+└── bge-m3/            XLM-RoBERTa encoder, 1024-dim multilingual embeddings   (RUNNER=pooling)
+    ├── model.env       identity + pooling knobs (no chat/generate flags)
+    ├── notes.md         dense/sparse/ColBERT facts, --runner pooling, fallbacks
+    └── serve            thin wrapper -> common/serve.sh with this dir
 .env                    box-wide secrets: API_KEY, HF_TOKEN
 .hf-venv/               venv for the bench harness + hf downloads
 ```
@@ -39,14 +44,15 @@ Weights and the vLLM compile cache live outside the repo:
 
 ## Models on this box
 
-| slug | served as | port | context | license | status |
-|---|---|---|---|---|---|
-| `qwen3.8-27b-fp8` | `qwen3.8-27b-uncensored` | 8000 | 65536 | Apache 2.0, uncensored | benchmark-tuned, in daily use |
-| `gpt-oss-120b` | `gpt-oss-120b` | 8002 | 65536 (starting point) | Apache 2.0, stock safety | scaffolded, benchmark pending |
+| slug | served as | port | endpoint | context | license | status |
+|---|---|---|---|---|---|---|
+| `qwen3.8-27b-fp8` | `qwen3.8-27b-uncensored` | 8000 | `/v1/chat/completions` | 65536 | Apache 2.0, uncensored | benchmark-tuned, in daily use |
+| `gpt-oss-120b` | `gpt-oss-120b` | 8002 | `/v1/chat/completions` | 65536 (starting point) | Apache 2.0, stock safety | scaffolded, benchmark pending |
+| `bge-m3` | `bge-m3` | 8001 | `/v1/embeddings` | 8192 | MIT | in use (embeddings for the litellm proxy) |
 
-Both run on the same 128 GB unified pool — see **Running multiple models**
-below before starting both at once (their current `GPU_MEM_UTIL` don't fit
-together yet).
+All three share the 128 GB unified pool — see **Running multiple models**
+below. `qwen3.8-27b-fp8` (`0.65`) + `bge-m3` (`0.12`) run together today;
+`gpt-oss-120b` (`0.85`) does not fit alongside either yet.
 
 ## Config layers
 
@@ -60,6 +66,13 @@ Each `.env` file uses `: "${K:=default}"`, so a set env var always wins.
 Empty by default; `gpt-oss-120b/model.env` documents the SM121 MXFP4 backend
 overrides it exists for.
 
+`RUNNER` (default `generate`) picks the vLLM 0.24.0 runner. `generate` gets the
+full chat flag set (parsers, tool-choice, kv-cache-dtype, MTP, mm-limits).
+`pooling` is for embedding models served at `/v1/embeddings` — a minimal flag
+set with none of those; it also reads `DTYPE` (passed as `--dtype` when not
+`auto`) and `ENFORCE_EAGER` (`1` adds `--enforce-eager`). CLS-pooling and
+L2-norm come from the model's own config — see `bge-m3/`.
+
 **Gotcha:** a few vars (`VLLM_IMAGE`, `HF_CACHE`, `VLLM_CACHE`, ...) already
 get a value from `box.env`'s own `:=`, so a `model.env` line using `:=` on
 one of *those* is a silent no-op (the var is already non-empty by the time
@@ -72,7 +85,7 @@ still `box.env`'s stock default, so a one-off env var still wins).
 ## Serve a model
 
 ```bash
-cd models/<slug>        # qwen3.8-27b-fp8  |  gpt-oss-120b
+cd models/<slug>        # qwen3.8-27b-fp8  |  gpt-oss-120b  |  bge-m3
 
 ./serve                 # start: detached, wait for /health, print the API URL
 ./serve status          # systemd state + container health + API URLs + model list
@@ -93,6 +106,9 @@ HF_HOME=/home/ss/models/hf-cache HF_TOKEN=hf_... \
 # weight formats -- vLLM only needs the HF-format safetensors shards)
 HF_HOME=/home/ss/models/hf-cache \
   .hf-venv/bin/hf download openai/gpt-oss-120b --exclude "metal/*" --exclude "original/*"
+
+# bge-m3 (public, no token)
+HF_HOME=/home/ss/models/hf-cache .hf-venv/bin/hf download BAAI/bge-m3
 ```
 
 First start is slow (weight load + torch.compile + CUDA-graph, + vision
@@ -123,6 +139,17 @@ curl -s http://localhost:8000/v1/chat/completions \
   uses its native `qwen3_coder` parser, gpt-oss-120b the Harmony
   `openai`/`openai_gptoss` parsers (see each `notes.md`).
 
+**Embeddings (`bge-m3`, `RUNNER=pooling`):** served at `/v1/embeddings`, not
+chat. 1024-dim dense vectors, CLS-pooled and L2-normalized (from the model
+config — nothing to pass).
+
+```bash
+curl -s http://localhost:8001/v1/embeddings \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $API_KEY" \
+  -d '{"model":"bge-m3","input":["Hallo Welt","the quick brown fox"]}'
+# -> data[0].embedding has length 1024
+```
+
 ## Persistent across reboots (systemd)
 
 ```bash
@@ -134,14 +161,19 @@ sudo systemctl restart llm-vllm@<slug>   # returns once serving again
 ./serve uninstall-service
 ```
 
-Currently installed: `llm-vllm@qwen3.8-27b-fp8` (enabled, boots automatically).
-`gpt-oss-120b` is not installed as a service yet — still being benchmarked,
-started ad-hoc via `./serve start` / `./serve stop`.
+Currently installed: `llm-vllm@qwen3.8-27b-fp8` and `llm-vllm@bge-m3` (both
+enabled, boot automatically). `gpt-oss-120b` is not installed as a service yet
+— still being benchmarked, started ad-hoc via `./serve start` / `./serve stop`.
 
 One template unit, one instance per model slug. systemd is the single
 supervisor — in this mode `serve.sh ... run` execs `docker run --rm` in the
 foreground, so no container `--restart` policy races with it on boot. If the
 unit is installed, use `systemctl`, not the bare `start`/`stop`.
+
+**The `llm-vllm@.service` template is shared and regenerated by every
+`install-service`** with that model's `TimeoutStartSec` / `STARTUP_TIMEOUT` —
+so `bge-m3/model.env` deliberately keeps `STARTUP_TIMEOUT=1200` (= qwen's) to
+leave the installed unit byte-identical.
 
 ---
 
@@ -153,10 +185,12 @@ headroom must stay under 1.0.** e.g. two models at `0.40` each + `~0.15` host.
 Container names are `vllm-<slug>`, benchmark containers `bench-<slug>`, so they
 never collide.
 
-**Right now qwen (`0.65`) + gpt-oss-120b (`0.85`) do NOT fit together**
-(sums to 1.5) — both `model.env`s flag this. Stop one before starting the
-other, or lower both `GPU_MEM_UTIL` values once gpt-oss-120b's real KV needs
-are known from its benchmark sweep.
+**Today's running pair:** qwen (`0.65`) + bge-m3 (`0.12`) = `0.77`, ~0.23 of
+the pool left for the host — fits, and both are systemd-enabled.
+**`gpt-oss-120b` (`0.85`) does not fit alongside either** (qwen+gpt = 1.5).
+Stop qwen before starting gpt-oss ad-hoc, or lower both `GPU_MEM_UTIL` once
+gpt-oss-120b's real KV needs are known from its benchmark sweep. bge-m3 is
+small enough to leave running either way.
 
 ## Benchmarking
 
@@ -205,4 +239,4 @@ manually curl each backend config first (see `notes.md`).
 Per-model — see each `models/<slug>/notes.md`. `qwen3.8-27b-fp8` is Apache 2.0,
 **uncensored / abliterated** (no built-in guardrails; research use, add your own
 moderation). `gpt-oss-120b` is Apache 2.0 (OpenAI, stock — keeps its own
-safety training). Scripts in this repo: MIT.
+safety training). `bge-m3` is MIT (BAAI). Scripts in this repo: MIT.

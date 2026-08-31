@@ -111,12 +111,40 @@ Expected one of ['deep_gemm', 'flashinfer_trtllm', 'flashinfer_trtllm_afp8',
 
 So `flashinfer_b12x` is real, but scoped to some other fused-MoE quant path
 (not MXFP4) -- `--help=all`'s per-hardware label doesn't imply per-quant
-compatibility. `matrix.yaml` now benchmarks `flashinfer_cutlass` in its
-place (accepted for MXFP4, plausibly the actual "modern SM12x" alternative
-to Marlin); `deep_gemm` is left untested since `VLLM_USE_DEEP_GEMM=0` is
+compatibility. `deep_gemm` is left untested since `VLLM_USE_DEEP_GEMM=0` is
 mandatory box-wide (separate sm_121 assert, see `common/box.env`) and
 forcing it as `--moe-backend` would fight that setting. `aiter*` are
 AMD/ROCm kernels, not applicable here.
+
+**`flashinfer_cutlass` also fails, different reason (backend_sweep,
+2026-08-31 rerun)** -- it's *accepted* as a valid MXFP4 backend name (unlike
+`b12x`), but rejects this specific checkpoint's quant layout at engine-core
+init:
+
+```
+ValueError: Mxfp4 MoE backend 'FLASHINFER_CUTLASS_MXFP4_BF16' does not
+support the deployment configuration since kernel does not support
+quantization scheme QuantKey(u8,scale(u8,static,GroupShape(row=1,
+col=32)),symmetric)xNone.
+```
+
+i.e. this FlashInfer CUTLASS kernel wants a different MXFP4 scale-group
+layout than gpt-oss-120b's checkpoint actually ships. Untried:
+`flashinfer_cutlass_afp8` (likely the same kernel family, same rejection
+expected), `flashinfer_trtllm(_afp8)`, `triton`, `triton_unfused`,
+`humming`. Given both flashinfer paths are out and each attempt costs a
+~7 min cold load, we settled on **Marlin** (`auto`'s pick, already
+correctness-verified) as the working backend rather than exhausting the
+rest of the enum -- revisit only if a throughput number motivates it.
+
+**Also notable:** the attention backend log line during every run so far
+reads `Using TRITON_ATTN attention backend out of potential backends:
+['TRITON_ATTN']` -- it's the *only* attention backend vLLM considers for
+this model+hardware combo, so `backend_marlin` and
+`backend_marlin_triton_attn` are functionally the same configuration; their
+throughput spread (33.43 vs 28.61 tok/s batch8) is cold-start/run-to-run
+noise, not a real backend difference. Explicit `--attention-backend
+TRITON_ATTN` is a no-op here.
 
 ### Partial-download vs. vLLM's snapshot completeness check (2026-08-31)
 

@@ -78,22 +78,28 @@ workloads:
 # ----------------------------------------------------------------------------
 configs:
   # --- MoE/attention backend selection (correctness-gated, see header note) --
-  # NOTE 2026-08-31: flashinfer_b12x (--help=all's "SM12x/DGX Spark" backend)
-  # is NOT valid for this model's MXFP4 quantization -- vLLM rejects it at
-  # engine-core init: "moe_backend='flashinfer_b12x' is not supported for
-  # MXFP4 MoE. Expected one of ['deep_gemm', 'flashinfer_trtllm',
-  # 'flashinfer_trtllm_afp8', 'flashinfer_cutlass', 'flashinfer_cutlass_afp8',
-  # 'triton', 'triton_unfused', 'humming', 'marlin', 'aiter', ...]".
-  # b12x is apparently for a different (non-MXFP4) fused-MoE quant path.
-  # Swapped in flashinfer_cutlass instead -- the FlashInfer path actually
-  # accepted for MXFP4, likely the real "modern SM12x" alternative to Marlin.
-  # deep_gemm skipped: box.env's VLLM_USE_DEEP_GEMM=0 is mandatory on sm_121
-  # (separate DeepGEMM UE8M0 "Unknown recipe" assert) -- untested here, but
-  # forcing deep_gemm as a --moe-backend would fight that box-wide setting.
-  backend_auto:                {extra_flags: []}
-  backend_flashinfer_cutlass:  {extra_flags: [--moe-backend, flashinfer_cutlass]}
-  backend_marlin:               {extra_flags: [--moe-backend, marlin]}
-  backend_marlin_triton_attn:  {extra_flags: [--moe-backend, marlin, --attention-backend, TRITON_ATTN]}
+  # NOTE 2026-08-31: both flashinfer --moe-backend options fail for this
+  # checkpoint -- see notes.md for the full writeup, short version here:
+  #   flashinfer_b12x       rejected outright: "not supported for MXFP4 MoE"
+  #                         (real backend, just not for this quant method)
+  #   flashinfer_cutlass    accepted as a name, then rejects the checkpoint's
+  #                         actual MXFP4 scale-group layout at engine-core
+  #                         init ("does not support the deployment
+  #                         configuration ... GroupShape(row=1, col=32)")
+  #   flashinfer_cutlass_afp8/flashinfer_trtllm(_afp8) untried (same kernel
+  #                         family as cutlass, or ~7 min cold load each to
+  #                         find out) -- not worth it once Marlin is already
+  #                         correctness-verified and working.
+  #   deep_gemm             skipped: box.env's VLLM_USE_DEEP_GEMM=0 is
+  #                         mandatory on sm_121 (separate assert)
+  #   aiter*                AMD/ROCm kernels, not applicable on this GPU
+  # Settled on Marlin (= what `auto` already picks). backend_marlin_triton_attn
+  # is kept only as a sanity duplicate -- the server log shows TRITON_ATTN is
+  # the ONLY attention backend vLLM considers here regardless, so it's not
+  # actually a different configuration from backend_marlin.
+  backend_auto:               {extra_flags: []}
+  backend_marlin:              {extra_flags: [--moe-backend, marlin]}
+  backend_marlin_triton_attn: {extra_flags: [--moe-backend, marlin, --attention-backend, TRITON_ATTN]}
 
   # --- max-num-seqs sweep (winning backend from above goes in extra_flags) ---
   seqs_1:  {max_num_seqs: 1}
@@ -119,7 +125,6 @@ configs:
 suites:
   backend_sweep:
     - [backend_auto,               [single_stream, batch8_balanced]]
-    - [backend_flashinfer_cutlass, [single_stream, batch8_balanced]]
     - [backend_marlin,             [single_stream, batch8_balanced]]
     - [backend_marlin_triton_attn, [single_stream, batch8_balanced]]
 

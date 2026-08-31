@@ -24,13 +24,13 @@ models/
 │       ├── matrix.yaml   the sweep (configs, workloads, suites)
 │       ├── ocr_test.png
 │       └── results/      per-run JSON, server logs, summary.csv, report.md/html, plots
-├── gpt-oss-120b/       native MXFP4 text MoE, Harmony format   (scaffolded; benchmark pending)
-│   ├── model.env       same layout as above, all knobs marked PENDING BENCHMARK
-│   ├── notes.md         model-card facts, SM121 MXFP4 "null Harmony token" bug writeup
+├── gpt-oss-120b/       native MXFP4 text MoE, Harmony format   (benchmark-tuned)
+│   ├── model.env       same layout as above, all knobs benchmark-tuned
+│   ├── notes.md         model-card facts, SM121 MXFP4 bug (verified NOT reproducing), sweep results
 │   ├── serve            thin wrapper -> common/serve.sh with this dir
 │   └── bench/
 │       ├── matrix.yaml   the sweep (configs, workloads, suites)
-│       └── results/      empty until the sweep runs
+│       └── results/      per-run JSON, server logs, summary.csv (4 suites: backend/seqs/kv/context)
 └── bge-m3/            XLM-RoBERTa encoder, 1024-dim multilingual embeddings   (RUNNER=pooling)
     ├── model.env       identity + pooling knobs (no chat/generate flags)
     ├── notes.md         dense/sparse/ColBERT facts, --runner pooling, fallbacks
@@ -47,7 +47,7 @@ Weights and the vLLM compile cache live outside the repo:
 | slug | served as | port | endpoint | context | license | status |
 |---|---|---|---|---|---|---|
 | `qwen3.8-27b-fp8` | `qwen3.8-27b-uncensored` | 8000 | `/v1/chat/completions` | 65536 | Apache 2.0, uncensored | benchmark-tuned, in daily use |
-| `gpt-oss-120b` | `gpt-oss-120b` | 8002 | `/v1/chat/completions` | 65536 (starting point) | Apache 2.0, stock safety | scaffolded, benchmark pending |
+| `gpt-oss-120b` | `gpt-oss-120b` | 8002 | `/v1/chat/completions` | 65536 | Apache 2.0, stock safety | benchmark-tuned |
 | `bge-m3` | `bge-m3` | 8001 | `/v1/embeddings` | 8192 | MIT | in use (embeddings for the litellm proxy) |
 
 All three share the 128 GB unified pool — see **Running multiple models**
@@ -188,8 +188,10 @@ never collide.
 **Today's running pair:** qwen (`0.65`) + bge-m3 (`0.12`) = `0.77`, ~0.23 of
 the pool left for the host — fits, and both are systemd-enabled.
 **`gpt-oss-120b` (`0.85`) does not fit alongside either** (qwen+gpt = 1.5).
-Stop qwen before starting gpt-oss ad-hoc, or lower both `GPU_MEM_UTIL` once
-gpt-oss-120b's real KV needs are known from its benchmark sweep. bge-m3 is
+Stop qwen before starting gpt-oss ad-hoc. Its sweep now shows real usage at
+0.85 (~66 GiB weights + ~34-35 GiB KV, ~101 GB of the ~109 GB carved) — not
+much slack to lower it without giving up KV headroom; a smaller cut than
+qwen's would be needed on both sides to run all three at once. bge-m3 is
 small enough to leave running either way.
 
 ## Benchmarking
@@ -208,12 +210,11 @@ See `common/bench/README.md`. For `qwen3.8-27b-fp8` the report is at
 `models/qwen3.8-27b-fp8/bench/results/overnight_20260827_191752/report.md`
 (and <https://claude.ai/code/artifact/0843d0cb-f656-4f09-8e08-3a6fa499fd67>).
 
-`gpt-oss-120b`'s `bench/matrix.yaml` sweep (backend/seqs/kv/context-scaling,
-see the file for suite names) hasn't been run yet — weights just landed.
-**Its `backend_*` configs are correctness-gated**: a known SM121 MXFP4 bug
-can make a broken MoE backend still report full token counts with
-`content: null` under the hood, which `vllm bench serve` would not catch —
-manually curl each backend config first (see `notes.md`).
+`gpt-oss-120b`'s `bench/matrix.yaml` sweep (backend/seqs/kv/context-scaling)
+is done — results in `bench/results/*_20260831_*/`, winning config already
+folded into `model.env`. The SM121 MXFP4 "null Harmony token" bug that
+motivated the correctness-gating on `backend_*` (see `notes.md`) was
+manually curl-verified **not** to reproduce on this box's image.
 
 ---
 

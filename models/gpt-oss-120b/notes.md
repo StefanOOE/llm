@@ -90,8 +90,33 @@ reasoning_start_str and reasoning_end_str.`
 The escalation order below is now dead code for THIS image (kept in
 `model.env` only as a documented fallback in case a future image/driver
 update regresses this):
-1. `--moe-backend flashinfer_b12x`
+1. ~~`--moe-backend flashinfer_b12x`~~ -- **invalid**, see next section
 2. `--moe-backend marlin --attention-backend TRITON_ATTN`
+
+### `flashinfer_b12x` is not a valid MXFP4 backend (found 2026-08-31)
+
+`vllm serve --help=all`'s `--moe-backend` enum lists `flashinfer_b12x` as
+"Use FlashInfer CuteDSL fused MoE for SM12x (RTX Pro 6000 / DGX Spark)" --
+looked like the obvious choice for this exact hardware. It isn't: passing
+it crashes engine-core init immediately (`bench/matrix.yaml`'s
+`backend_sweep`, `backend_flashinfer_b12x` config, before the fix below):
+
+```
+ValueError: moe_backend='flashinfer_b12x' is not supported for MXFP4 MoE.
+Expected one of ['deep_gemm', 'flashinfer_trtllm', 'flashinfer_trtllm_afp8',
+'flashinfer_cutlass', 'flashinfer_cutlass_afp8', 'triton', 'triton_unfused',
+'humming', 'marlin', 'aiter', 'aiter_mxfp4_fp8', 'aiter_mxfp4_mxfp4', 'xpu',
+'cpu', 'emulation'].
+```
+
+So `flashinfer_b12x` is real, but scoped to some other fused-MoE quant path
+(not MXFP4) -- `--help=all`'s per-hardware label doesn't imply per-quant
+compatibility. `matrix.yaml` now benchmarks `flashinfer_cutlass` in its
+place (accepted for MXFP4, plausibly the actual "modern SM12x" alternative
+to Marlin); `deep_gemm` is left untested since `VLLM_USE_DEEP_GEMM=0` is
+mandatory box-wide (separate sm_121 assert, see `common/box.env`) and
+forcing it as `--moe-backend` would fight that setting. `aiter*` are
+AMD/ROCm kernels, not applicable here.
 
 ### Partial-download vs. vLLM's snapshot completeness check (2026-08-31)
 

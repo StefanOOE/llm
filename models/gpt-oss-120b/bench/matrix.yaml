@@ -38,7 +38,7 @@ defaults:
     gpu_memory_utilization: 0.85
     max_model_len: 65536
     max_num_seqs: 8
-    kv_cache_dtype: auto          # auto(=bf16) | fp8 — checkpoint has no k/v_scale, same caveat as qwen-fp8
+    kv_cache_dtype: fp8           # benchmarked winner (kv_sweep, 2026-08-31) — see model.env for numbers
     spec: null                    # gpt_oss has no speculative-decoding head; always null
     prefix_caching: false
     max_num_batched_tokens: null  # null => vLLM default

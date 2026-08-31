@@ -14,14 +14,15 @@ common/
 ├── llm-vllm@.service   systemd template (reference; install-service generates the real one)
 └── bench/              run.py · report.py · ab_lmonly.py · _env.py
 models/
-└── qwen3.8-27b-fp8/
-    ├── model.env       identity + benchmark-tuned serving knobs   ← the parametrization
-    ├── notes.md        model-card facts + gotchas
-    ├── serve           thin wrapper -> common/serve.sh with this dir
-    └── bench/
-        ├── matrix.yaml   the sweep (configs, workloads, suites)
-        ├── ocr_test.png
-        └── results/      per-run JSON, server logs, summary.csv, report.md/html, plots
+├── qwen3.8-27b-fp8/    FP8 vision MoE, MTP speculative decoding   (benchmark-tuned)
+│   ├── model.env       identity + benchmark-tuned serving knobs   ← the parametrization
+│   ├── notes.md        model-card facts + gotchas
+│   ├── serve           thin wrapper -> common/serve.sh with this dir
+│   └── bench/
+│       ├── matrix.yaml   the sweep (configs, workloads, suites)
+│       ├── ocr_test.png
+│       └── results/      per-run JSON, server logs, summary.csv, report.md/html, plots
+└── gpt-oss-120b/       native MXFP4 text MoE, Harmony format   (scaffolded; benchmark pending)
 .env                    box-wide secrets: API_KEY, HF_TOKEN
 .hf-venv/               venv for the bench harness + hf downloads
 ```
@@ -34,6 +35,12 @@ Weights and the vLLM compile cache live outside the repo:
 `common/box.env` (hardware) → `models/<slug>/model.env` (the model) →
 a real environment variable at call time (`MAX_MODEL_LEN=32768 ./serve start`).
 Each `.env` file uses `: "${K:=default}"`, so a set env var always wins.
+
+`EXTRA_VLLM_ARGS` (a plain space-separated string) is appended verbatim to
+`vllm serve` — the escape hatch for flags with no dedicated knob, e.g.
+`EXTRA_VLLM_ARGS="--moe-backend marlin --attention-backend TRITON_ATTN" ./serve start`.
+Empty by default; `gpt-oss-120b/model.env` documents the SM121 MXFP4 backend
+overrides it exists for.
 
 ---
 
@@ -134,4 +141,5 @@ See `common/bench/README.md`. For `qwen3.8-27b-fp8` the report is at
 
 Per-model — see each `models/<slug>/notes.md`. `qwen3.8-27b-fp8` is Apache 2.0,
 **uncensored / abliterated** (no built-in guardrails; research use, add your own
-moderation). Scripts in this repo: MIT.
+moderation). `gpt-oss-120b` is Apache 2.0 (OpenAI, stock — keeps its own
+safety training). Scripts in this repo: MIT.

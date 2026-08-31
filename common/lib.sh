@@ -3,9 +3,15 @@
 #  Sourced AFTER box.env + model.env + the derived vars in serve.sh, so every
 #  function below just reads the globals: MODEL SERVED_NAME CONTAINER HOST PORT
 #  MAX_MODEL_LEN MAX_NUM_SEQS GPU_MEM_UTIL KV_CACHE_DTYPE MTP_TOKENS
-#  LANGUAGE_MODEL_ONLY MM_* REASONING_PARSER TOOL_CALL_PARSER
+#  LANGUAGE_MODEL_ONLY MM_* REASONING_PARSER TOOL_CALL_PARSER EXTRA_VLLM_ARGS
 #  VLLM_IMAGE HF_CACHE VLLM_CACHE VLLM_USE_DEEP_GEMM STARTUP_TIMEOUT
 #  API_KEY HF_TOKEN  SLUG MODEL_DIR LLM_ROOT COMMON_DIR UNIT BOX_*
+#
+#  EXTRA_VLLM_ARGS (optional, default ""): a plain space-separated string of
+#  extra flags for `vllm serve`, word-split as-is (no quoting/JSON values) —
+#  e.g. a model whose optimal --moe-backend / --attention-backend was found
+#  by benchmarking, not read from the checkpoint. Unset -> no-op for models
+#  (like qwen3.8-27b-fp8) that don't need it.
 # =============================================================================
 
 # -- docker (works with or without docker-group membership) --------------- #
@@ -80,6 +86,10 @@ assemble_args() {
     --enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER"
     --tensor-parallel-size 1
   )
+  if [ -n "${EXTRA_VLLM_ARGS:-}" ]; then
+    # shellcheck disable=SC2206  # intentional word-splitting of a flat flag list
+    VLLM_ARGS+=( ${EXTRA_VLLM_ARGS} )
+  fi
 }
 
 banner() {
@@ -96,6 +106,7 @@ banner() {
   kv cache     : ${KV_CACHE_DTYPE}
   MTP          : ${MTP_TOKENS} draft token(s)$( [ "${MTP_TOKENS}" -eq 0 ] && echo '  (disabled)' )
   vision       : ${VISION_DESC}
+  extra args   : ${EXTRA_VLLM_ARGS:-(none)}
   container    : ${CONTAINER}
   endpoint     : http://${HOST}:${PORT}/v1   (served as '${SERVED_NAME}')
 ==========================================================

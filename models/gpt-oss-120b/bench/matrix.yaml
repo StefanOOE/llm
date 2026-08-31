@@ -1,0 +1,139 @@
+# Benchmark matrix for openai/gpt-oss-120b on NVIDIA DGX Spark (GB10)
+#
+#   sg docker -c ".hf-venv/bin/python common/bench/run.py --model models/gpt-oss-120b --suite <name>"
+#
+# Image / caches / repo id / served name / port come from  common/box.env +
+# models/gpt-oss-120b/model.env . This file is ONLY the sweep: `models` (repo
+# ids to resolve from the HF cache), per-config knobs, workloads, and suites.
+#
+# GB10 + gpt-oss-120b notes (see ../notes.md for the full writeup + sources):
+#  - 128 GB *unified* LPDDR5x: --gpu-memory-utilization carves from the whole pool.
+#  - VLLM_USE_DEEP_GEMM=0 mandatory (asserts on sm_121); set in box.env + env below.
+#  - No MTP/EAGLE head for gpt_oss -> no spec-decode axis here (unlike qwen3.8).
+#  - IMPORTANT: `vllm bench serve` only counts tokens; it does NOT check that
+#    `content`/`reasoning` are non-null. A known SM121 MXFP4 bug (see notes.md)
+#    makes the FIRST Harmony token wrong while still generating a full,
+#    token-counted response -> a broken backend can still look fast here.
+#    Manually curl a chat completion against EVERY backend_* config below and
+#    confirm real, non-null content before trusting its throughput numbers.
+
+defaults:
+  models:                              # repo id; run.py resolves the newest local snapshot
+    default: {path: openai/gpt-oss-120b}
+  # appended to every `vllm serve` in the sweep
+  common_flags:
+    - --language-model-only            # text-only model; keeps this generic across the framework
+    - --trust-remote-code
+    - --reasoning-parser=openai_gptoss
+    - --enable-auto-tool-choice
+    - --tool-call-parser=openai
+  env:
+    VLLM_USE_DEEP_GEMM: "0"
+    LANG: C.UTF-8
+    LC_ALL: C.UTF-8
+    HF_HUB_OFFLINE: "1"
+  # per-config knobs and their defaults
+  config_defaults:
+    model: default
+    gpu_memory_utilization: 0.85
+    max_model_len: 65536
+    max_num_seqs: 8
+    kv_cache_dtype: auto          # auto(=bf16) | fp8 — checkpoint has no k/v_scale, same caveat as qwen-fp8
+    spec: null                    # gpt_oss has no speculative-decoding head; always null
+    prefix_caching: false
+    max_num_batched_tokens: null  # null => vLLM default
+    extra_flags: []               # --moe-backend / --attention-backend overrides live here
+  # per-workload knobs and their defaults (fed to `vllm bench serve`)
+  workload_defaults:
+    input_len: 1024
+    output_len: 1024
+    num_prompts: 16
+    concurrency: 16
+    request_rate: inf
+    ignore_eos: true
+    warmups: 3
+  server_startup_timeout_s: 1800
+  teardown_pause_s: 12
+
+# ----------------------------------------------------------------------------
+workloads:
+  # --- harness validation ------------------------------------------------
+  smoke_stream: {input_len: 256, output_len: 256, num_prompts: 3, concurrency: 1, warmups: 1}
+  smoke_batch:  {input_len: 512, output_len: 256, num_prompts: 8, concurrency: 8, warmups: 1}
+
+  # --- backend/seqs-sweep workloads (kept short; same shape at every batch size) ---
+  single_stream:   {input_len: 512,  output_len: 1024, num_prompts: 3,  concurrency: 1}
+  batch4_balanced: {input_len: 1024, output_len: 1024, num_prompts: 12, concurrency: 4}
+  batch8_balanced: {input_len: 1024, output_len: 1024, num_prompts: 16, concurrency: 8}
+  codegen_decode:  {input_len: 1024, output_len: 4096, num_prompts: 8,  concurrency: 8}
+
+  # --- context-scaling workloads (input ~45% of ctx; n scaled to keep KV real) ---
+  ctx4k_load:    {input_len: 1800,   output_len: 400,  num_prompts: 12, concurrency: 8}
+  ctx8k_load:    {input_len: 3600,   output_len: 800,  num_prompts: 12, concurrency: 8}
+  ctx16k_load:   {input_len: 7200,   output_len: 1600, num_prompts: 8,  concurrency: 6}
+  ctx32k_load:   {input_len: 14000,  output_len: 3000, num_prompts: 6,  concurrency: 4}
+  ctx65k_load:   {input_len: 28000,  output_len: 4000, num_prompts: 4,  concurrency: 3}
+  ctx131k_load:  {input_len: 56000,  output_len: 8000, num_prompts: 2,  concurrency: 2}
+
+# ----------------------------------------------------------------------------
+configs:
+  # --- MoE/attention backend selection (correctness-gated, see header note) --
+  backend_auto:               {extra_flags: []}
+  backend_flashinfer_b12x:    {extra_flags: [--moe-backend, flashinfer_b12x]}
+  backend_marlin:              {extra_flags: [--moe-backend, marlin]}
+  backend_marlin_triton_attn: {extra_flags: [--moe-backend, marlin, --attention-backend, TRITON_ATTN]}
+
+  # --- max-num-seqs sweep (winning backend from above goes in extra_flags) ---
+  seqs_1:  {max_num_seqs: 1}
+  seqs_2:  {max_num_seqs: 2}
+  seqs_4:  {max_num_seqs: 4}
+  seqs_8:  {max_num_seqs: 8}
+  seqs_16: {max_num_seqs: 16}
+
+  # --- KV cache dtype ---
+  kv_auto: {kv_cache_dtype: auto}
+  kv_fp8:  {kv_cache_dtype: fp8}
+
+  # --- context scaling (gpu_memory_utilization 0.85 throughout; seqs trimmed for headroom) ---
+  ctx_4k:   {max_model_len: 4096,   max_num_seqs: 8}
+  ctx_8k:   {max_model_len: 8192,   max_num_seqs: 8}
+  ctx_16k:  {max_model_len: 16384,  max_num_seqs: 6}
+  ctx_32k:  {max_model_len: 32768,  max_num_seqs: 4}
+  ctx_65k:  {max_model_len: 65536,  max_num_seqs: 4}
+  ctx_131k: {max_model_len: 131072, max_num_seqs: 2}
+
+# ----------------------------------------------------------------------------
+# A suite = ordered list of [config, [workloads...]] pairs.
+suites:
+  backend_sweep:
+    - [backend_auto,               [single_stream, batch8_balanced]]
+    - [backend_flashinfer_b12x,    [single_stream, batch8_balanced]]
+    - [backend_marlin,             [single_stream, batch8_balanced]]
+    - [backend_marlin_triton_attn, [single_stream, batch8_balanced]]
+
+  seqs_sweep:
+    - [seqs_1,  [single_stream, batch4_balanced, codegen_decode]]
+    - [seqs_2,  [single_stream, batch4_balanced, codegen_decode]]
+    - [seqs_4,  [single_stream, batch4_balanced, codegen_decode]]
+    - [seqs_8,  [single_stream, batch4_balanced, codegen_decode]]
+    - [seqs_16, [single_stream, batch4_balanced, codegen_decode]]
+
+  kv_sweep:
+    - [kv_auto, [single_stream, batch8_balanced, codegen_decode]]
+    - [kv_fp8,  [single_stream, batch8_balanced, codegen_decode]]
+
+  context_scaling:
+    - [ctx_4k,   [ctx4k_load]]
+    - [ctx_8k,   [ctx8k_load]]
+    - [ctx_16k,  [ctx16k_load]]
+    - [ctx_32k,  [ctx32k_load]]
+    - [ctx_65k,  [ctx65k_load]]
+    - [ctx_131k, [ctx131k_load]]
+
+  # convenience: the full overnight batch, in run order
+  overnight:
+    include: [backend_sweep, seqs_sweep, kv_sweep, context_scaling]
+
+  # tiny end-to-end validation of the harness (~1 server start, ~2 short runs)
+  smoke:
+    - [seqs_8, [smoke_stream, smoke_batch]]

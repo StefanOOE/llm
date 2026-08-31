@@ -1,12 +1,20 @@
 # openai/gpt-oss-120b — notes
 
-**Status (2026-08-31): smoke-tested and correctness-verified on this box.**
-The SM121 "null Harmony token" bug (below) does **not** reproduce here —
-`auto` picks the MARLIN MXFP4 backend and both `content` and `reasoning`
-come back non-null and coherent across repeated requests, plain chat and
-tool-calling alike. Benchmark sweep (`bench/matrix.yaml`) is next; until it
-runs, `model.env`'s numeric knobs (context/seqs/KV dtype) are still
-starting-point values, not benchmark results, unlike qwen3.8-27b-fp8's.
+**Status (2026-08-31): benchmark-tuned.** Correctness-verified (SM121 "null
+Harmony token" bug does **not** reproduce here) and all of `model.env`'s
+numeric knobs are now backed by real sweeps, same as qwen3.8-27b-fp8:
+- **MoE backend:** Marlin (`auto`'s pick) — both FlashInfer options fail
+  (`flashinfer_b12x` invalid for MXFP4, `flashinfer_cutlass` rejects this
+  checkpoint's scale-group layout). `EXTRA_VLLM_ARGS` stays empty.
+- **max-num-seqs 8:** confirmed the sweet spot — `codegen_decode`
+  throughput peaks exactly here and regresses past it.
+- **KV cache fp8:** ~2x concurrency at ~equal pool size, faster on batched
+  workloads too.
+- **Context 65536:** set by the deployment's floor (>=64000), sweep
+  confirms it's far cheaper than 131k (~3x lower TTFT, ~3.4x higher
+  throughput) for headroom this deployment doesn't need.
+
+Raw results + full per-suite writeups: `bench/results/*_20260831_*/`.
 
 ## What it is
 

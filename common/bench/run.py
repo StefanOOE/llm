@@ -251,6 +251,15 @@ def run_workload(mx: dict, cfg: dict, wl: dict, model: dict, outdir: Path) -> di
         "--dataset-name", "random",
         "--random-input-len", str(wl["input_len"]),
         "--random-output-len", str(wl["output_len"]),
+    ]
+    # optional: fixed shared prefix (+ suffix-length jitter) to emulate a
+    # repeated large system prompt/tool schema -- both are no-ops (0/absent)
+    # for every workload that doesn't set them.
+    if wl.get("prefix_len"):
+        bench += ["--random-prefix-len", str(wl["prefix_len"])]
+    if wl.get("random_range_ratio"):
+        bench += ["--random-range-ratio", str(wl["random_range_ratio"])]
+    bench += [
         "--num-prompts", str(wl["num_prompts"]),
         "--max-concurrency", str(wl["concurrency"]),
         "--request-rate", str(wl["request_rate"]),

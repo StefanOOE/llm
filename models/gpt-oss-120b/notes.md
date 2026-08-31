@@ -1,11 +1,12 @@
 # openai/gpt-oss-120b — notes
 
-**Status (2026-08-29): weights downloading, not yet smoke-tested on this box.**
-Everything below is either a checkpoint fact (config.json) or a claim from
-third-party writeups about *other* vLLM versions/images on the same GB10
-hardware — treat the latter as hypotheses to verify, not settled config.
-Once a bench pass runs, replace this header and `model.env`'s "PENDING
-BENCHMARK" values with our own numbers.
+**Status (2026-08-31): smoke-tested and correctness-verified on this box.**
+The SM121 "null Harmony token" bug (below) does **not** reproduce here —
+`auto` picks the MARLIN MXFP4 backend and both `content` and `reasoning`
+come back non-null and coherent across repeated requests, plain chat and
+tool-calling alike. Benchmark sweep (`bench/matrix.yaml`) is next; until it
+runs, `model.env`'s numeric knobs (context/seqs/KV dtype) are still
+starting-point values, not benchmark results, unlike qwen3.8-27b-fp8's.
 
 ## What it is
 
@@ -45,7 +46,7 @@ BENCHMARK" values with our own numbers.
   the box's own image, 2026-08-29). `auto` may now select it correctly.
 - **`--moe-backend marlin`** also exists in this image's `--help=all` enum.
 
-### The SM121 "null Harmony token" bug — unverified on this image
+### The SM121 "null Harmony token" bug — VERIFIED NOT REPRODUCING (2026-08-31)
 
 Multiple independent DGX-Spark writeups (community forum threads, blog posts,
 one filed vLLM issue) describe the *same* failure on SM121/GB10 across vLLM
@@ -64,20 +65,51 @@ TRITON_ATTN` (FlashInfer attention was separately reported broken/slow for
 gpt-oss's attention-sink layers on some of those versions).
 
 **This box's image (26.07-py3 / vLLM 0.24.0) is newer than every version in
-those reports**, and — notably — already ships the `flashinfer_b12x` backend
-built for exactly this GPU family, which didn't exist in the versions where
-the bug was reported. It is plausible the bug is already fixed here via
-`auto`-selection, but this is unverified — nobody's writeup covers 0.24.0 /
-26.07 specifically. **First smoke test after weights land must check for
-this exact symptom** (send a real chat request, confirm `content` is
-non-null and coherent — not just that the server returns HTTP 200) before
-trusting any config, benchmarked or not.
+those reports.** Verification (2026-08-31, real `./serve start` +
+manual curl, not the automated bench harness — see matrix.yaml's header on
+why that harness alone can't catch this):
 
-If it reproduces, escalate through `model.env`'s `EXTRA_VLLM_ARGS` in this
-order (documented there too):
-1. `--moe-backend flashinfer_b12x` (explicit, in case `auto` guesses wrong)
-2. `--moe-backend marlin --attention-backend TRITON_ATTN` (matches the
-   community workaround combination most consistently reported to work)
+- `auto` MoE backend selection actually picked **MARLIN** (log line:
+  `Using 'MARLIN' Mxfp4 MoE backend`) — the exact backend named in the bug
+  reports, not the newer `flashinfer_b12x` one. Attention backend: `TRITON_ATTN`.
+- Plain chat and a `tools`-bearing request both returned non-null, coherent
+  `content`/`reasoning` — repeated 3x on a second prompt for stability, same
+  result every time (`Paris` / `Paris.` / `Paris`, sensible reasoning trace
+  each time).
+- **Conclusion: the bug does not reproduce on this image**, even on the
+  backend it was originally reported against. Whatever fixed it landed
+  somewhere in the vLLM version range between the writeups (0.16.0rc2-0.20.1)
+  and 0.24.0 — no need to force `flashinfer_b12x` or fall back to
+  `TRITON_ATTN` explicitly; `EXTRA_VLLM_ARGS` stays empty in `model.env`.
+
+One unrelated warning seen at startup, apparently benign (reasoning/content
+came back fine regardless): `Auto-initialization of reasoning token IDs
+failed. Please check whether your reasoning parser has implemented the
+reasoning_start_str and reasoning_end_str.`
+
+The escalation order below is now dead code for THIS image (kept in
+`model.env` only as a documented fallback in case a future image/driver
+update regresses this):
+1. `--moe-backend flashinfer_b12x`
+2. `--moe-backend marlin --attention-backend TRITON_ATTN`
+
+### Partial-download vs. vLLM's snapshot completeness check (2026-08-31)
+
+First start attempt failed: `IncompleteSnapshotError: ... 11 file(s) are
+missing (metal/model.bin, original/config.json, ...)`. Cause: our download
+deliberately excludes `metal/` and `original/` (Apple/OpenAI-native formats
+vLLM doesn't read), but vLLM 0.24.0's `get_model_path()` still calls HF's
+`snapshot_download()` even under `HF_HUB_OFFLINE=1`, which validates the
+local cache against the *full* upstream file listing and raises on any
+"missing" file — including ones excluded on purpose.
+
+Fix: that function's actual first line is `if os.path.exists(model): return
+model` — a local path skips the whole hub/completeness check. `model.env`
+now resolves the cached snapshot dir from `HF_CACHE/hub/.../refs/main` and
+passes it via `lib.sh`'s new `VLLM_MODEL_PATH` (overrides what's handed to
+`vllm serve`; `MODEL` itself stays the repo id everywhere else — preflight,
+banner, `hf download` hints). See `lib.sh`'s header comment for the general
+mechanism.
 
 ### Reported throughput elsewhere (NOT this box — different vLLM versions/images)
 

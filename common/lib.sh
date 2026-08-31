@@ -26,6 +26,16 @@
 #              --pooler-config unless a test shows it's wrong.
 #  DTYPE (optional): passed as `--dtype` only when set and != "auto".
 #  ENFORCE_EAGER (optional, default 0): 1 adds `--enforce-eager`.
+#
+#  VLLM_MODEL_PATH (optional): if set, passed to `vllm serve` INSTEAD of
+#  $MODEL (which still names the repo id everywhere else -- preflight's
+#  weights-present check, the banner, error messages). Needed when the local
+#  HF cache is a deliberately partial snapshot (e.g. gpt-oss-120b's --exclude
+#  metal/original): vLLM 0.24's get_model_path() calls HF's snapshot_download
+#  even with HF_HUB_OFFLINE=1, which raises IncompleteSnapshotError for files
+#  missing on purpose. Its actual first line is `if os.path.exists(model):
+#  return model` -- a local path (container-side, under /hf-cache/...) skips
+#  the whole hub check. See gpt-oss-120b/model.env for how it's resolved.
 # =============================================================================
 
 # -- docker (works with or without docker-group membership) --------------- #
@@ -80,7 +90,7 @@ assemble_args() {
     [ -n "${DTYPE:-}" ] && [ "${DTYPE}" != "auto" ] && dtype=(--dtype "${DTYPE}")
     [ "${ENFORCE_EAGER:-0}" = "1" ] && eager=(--enforce-eager)
     VLLM_ARGS=(
-      vllm serve "$MODEL"
+      vllm serve "${VLLM_MODEL_PATH:-$MODEL}"
       --served-model-name "$SERVED_NAME"
       --host "$HOST" --port "$PORT"
       --api-key "$API_KEY"
@@ -106,7 +116,7 @@ assemble_args() {
     fi
 
     VLLM_ARGS=(
-      vllm serve "$MODEL"
+      vllm serve "${VLLM_MODEL_PATH:-$MODEL}"
       --served-model-name "$SERVED_NAME"
       --host "$HOST" --port "$PORT"
       --api-key "$API_KEY"
@@ -136,7 +146,7 @@ banner() {
 ==========================================================
  ${SLUG}   [${1}]
 ==========================================================
-  model        : ${MODEL}
+  model        : ${MODEL}$( [ -n "${VLLM_MODEL_PATH:-}" ] && echo "  (served from local path: ${VLLM_MODEL_PATH})" )
   image        : ${VLLM_IMAGE}
   runner       : pooling   (embeddings — POST /v1/embeddings)
   context      : ${MAX_MODEL_LEN} tokens
@@ -154,7 +164,7 @@ EOF
 ==========================================================
  ${SLUG}   [${1}]
 ==========================================================
-  model        : ${MODEL}
+  model        : ${MODEL}$( [ -n "${VLLM_MODEL_PATH:-}" ] && echo "  (served from local path: ${VLLM_MODEL_PATH})" )
   image        : ${VLLM_IMAGE}
   context      : ${MAX_MODEL_LEN} tokens
   max seqs     : ${MAX_NUM_SEQS}

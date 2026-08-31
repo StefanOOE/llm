@@ -18,17 +18,35 @@ models/
 │   ├── model.env       identity + benchmark-tuned serving knobs   ← the parametrization
 │   ├── notes.md        model-card facts + gotchas
 │   ├── serve           thin wrapper -> common/serve.sh with this dir
+│   ├── docker/         Dockerfile.xgrammar024 (xgrammar 0.2.0->0.2.4 patch, see notes.md)
 │   └── bench/
 │       ├── matrix.yaml   the sweep (configs, workloads, suites)
 │       ├── ocr_test.png
 │       └── results/      per-run JSON, server logs, summary.csv, report.md/html, plots
 └── gpt-oss-120b/       native MXFP4 text MoE, Harmony format   (scaffolded; benchmark pending)
+    ├── model.env       same layout as above, all knobs marked PENDING BENCHMARK
+    ├── notes.md         model-card facts, SM121 MXFP4 "null Harmony token" bug writeup
+    ├── serve            thin wrapper -> common/serve.sh with this dir
+    └── bench/
+        ├── matrix.yaml   the sweep (configs, workloads, suites)
+        └── results/      empty until the sweep runs
 .env                    box-wide secrets: API_KEY, HF_TOKEN
 .hf-venv/               venv for the bench harness + hf downloads
 ```
 
 Weights and the vLLM compile cache live outside the repo:
 `/home/ss/models/hf-cache`, `/home/ss/models/vllm-cache`.
+
+## Models on this box
+
+| slug | served as | port | context | license | status |
+|---|---|---|---|---|---|
+| `qwen3.8-27b-fp8` | `qwen3.8-27b-uncensored` | 8000 | 65536 | Apache 2.0, uncensored | benchmark-tuned, in daily use |
+| `gpt-oss-120b` | `gpt-oss-120b` | 8002 | 65536 (starting point) | Apache 2.0, stock safety | scaffolded, benchmark pending |
+
+Both run on the same 128 GB unified pool — see **Running multiple models**
+below before starting both at once (their current `GPU_MEM_UTIL` don't fit
+together yet).
 
 ## Config layers
 
@@ -42,12 +60,19 @@ Each `.env` file uses `: "${K:=default}"`, so a set env var always wins.
 Empty by default; `gpt-oss-120b/model.env` documents the SM121 MXFP4 backend
 overrides it exists for.
 
+**Gotcha:** a few vars (`VLLM_IMAGE`, `HF_CACHE`, `VLLM_CACHE`, ...) already
+get a value from `box.env`'s own `:=`, so a `model.env` line using `:=` on
+one of *those* is a silent no-op (the var is already non-empty by the time
+it runs) — a real per-model override needs a plain assignment instead, e.g.
+`qwen3.8-27b-fp8/model.env`'s `VLLM_IMAGE` override (only replaces it if
+still `box.env`'s stock default, so a one-off env var still wins).
+
 ---
 
 ## Serve a model
 
 ```bash
-cd models/qwen3.8-27b-fp8
+cd models/<slug>        # qwen3.8-27b-fp8  |  gpt-oss-120b
 
 ./serve                 # start: detached, wait for /health, print the API URL
 ./serve status          # systemd state + container health + API URLs + model list
@@ -56,20 +81,29 @@ cd models/qwen3.8-27b-fp8
 ```
 
 Prerequisites: Docker + NVIDIA Container Toolkit; `.env` with `API_KEY`
-(`openssl rand -hex 32`) and `HF_TOKEN`; the weights downloaded —
+(`openssl rand -hex 32`) and `HF_TOKEN` (only needed for gated repos); the
+weights downloaded —
 
 ```bash
+# qwen3.8-27b-fp8 (gated -> needs HF_TOKEN)
 HF_HOME=/home/ss/models/hf-cache HF_TOKEN=hf_... \
   .hf-venv/bin/hf download orcarouter/Qwen3.8-27B-Uncensored-FP8
+
+# gpt-oss-120b (public, no token; skip the Apple-metal and OpenAI-native
+# weight formats -- vLLM only needs the HF-format safetensors shards)
+HF_HOME=/home/ss/models/hf-cache \
+  .hf-venv/bin/hf download openai/gpt-oss-120b --exclude "metal/*" --exclude "original/*"
 ```
 
-First start ~7 min (weight load + torch.compile + CUDA-graph + vision encoder);
-later starts are faster (compile cache persists). It prints:
+First start is slow (weight load + torch.compile + CUDA-graph, + vision
+encoder for qwen, + ~63 GiB cold load for gpt-oss-120b — `STARTUP_TIMEOUT` in
+each `model.env` is sized for this); later starts are faster (compile cache
+persists). It prints:
 
 ```
-  base URL (local)  : http://localhost:8000/v1
-  base URL (network): http://<lan-ip>:8000/v1
-  model id          : qwen3.8-27b-uncensored
+  base URL (local)  : http://localhost:<port>/v1
+  base URL (network): http://<lan-ip>:<port>/v1
+  model id          : <served-name>
   auth              : header  'Authorization: Bearer <API_KEY>'   (required)
 ```
 
@@ -79,20 +113,30 @@ curl -s http://localhost:8000/v1/chat/completions \
   -d '{"model":"qwen3.8-27b-uncensored","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-- **No thinking:** add `"chat_template_kwargs": {"enable_thinking": false}`.
-- **Vision / OCR:** `content` = a list of a `text` part and an `image_url` part
-  (`data:image/png;base64,...`).
+- **No thinking:** add `"chat_template_kwargs": {"enable_thinking": false}`
+  (qwen3.8-27b-fp8) — gpt-oss-120b's Harmony reasoning channel comes back in
+  the `reasoning` field regardless, not toggleable per request the same way.
+- **Vision / OCR (qwen3.8-27b-fp8 only):** `content` = a list of a `text`
+  part and an `image_url` part (`data:image/png;base64,...`). gpt-oss-120b is
+  text-only.
+- **Tool calling:** both models run with `--enable-auto-tool-choice`; qwen
+  uses its native `qwen3_coder` parser, gpt-oss-120b the Harmony
+  `openai`/`openai_gptoss` parsers (see each `notes.md`).
 
 ## Persistent across reboots (systemd)
 
 ```bash
-./serve install-service     # generates + enables  llm-vllm@qwen3.8-27b-fp8  (sudo)
+./serve install-service     # generates + enables  llm-vllm@<slug>  (sudo)
 
-systemctl status llm-vllm@qwen3.8-27b-fp8
-journalctl -u  llm-vllm@qwen3.8-27b-fp8 -f
-sudo systemctl restart llm-vllm@qwen3.8-27b-fp8   # returns once serving again
+systemctl status llm-vllm@<slug>
+journalctl -u  llm-vllm@<slug> -f
+sudo systemctl restart llm-vllm@<slug>   # returns once serving again
 ./serve uninstall-service
 ```
+
+Currently installed: `llm-vllm@qwen3.8-27b-fp8` (enabled, boots automatically).
+`gpt-oss-120b` is not installed as a service yet — still being benchmarked,
+started ad-hoc via `./serve start` / `./serve stop`.
 
 One template unit, one instance per model slug. systemd is the single
 supervisor — in this mode `serve.sh ... run` execs `docker run --rm` in the
@@ -108,6 +152,11 @@ pool is shared: **the sum of every running model's `GPU_MEM_UTIL` plus host
 headroom must stay under 1.0.** e.g. two models at `0.40` each + `~0.15` host.
 Container names are `vllm-<slug>`, benchmark containers `bench-<slug>`, so they
 never collide.
+
+**Right now qwen (`0.65`) + gpt-oss-120b (`0.85`) do NOT fit together**
+(sums to 1.5) — both `model.env`s flag this. Stop one before starting the
+other, or lower both `GPU_MEM_UTIL` values once gpt-oss-120b's real KV needs
+are known from its benchmark sweep.
 
 ## Benchmarking
 
@@ -125,6 +174,13 @@ See `common/bench/README.md`. For `qwen3.8-27b-fp8` the report is at
 `models/qwen3.8-27b-fp8/bench/results/overnight_20260827_191752/report.md`
 (and <https://claude.ai/code/artifact/0843d0cb-f656-4f09-8e08-3a6fa499fd67>).
 
+`gpt-oss-120b`'s `bench/matrix.yaml` sweep (backend/seqs/kv/context-scaling,
+see the file for suite names) hasn't been run yet — weights just landed.
+**Its `backend_*` configs are correctness-gated**: a known SM121 MXFP4 bug
+can make a broken MoE backend still report full token counts with
+`content: null` under the hood, which `vllm bench serve` would not catch —
+manually curl each backend config first (see `notes.md`).
+
 ---
 
 ## Box-wide gotchas (`common/box.env`)
@@ -134,6 +190,13 @@ See `common/bench/README.md`. For `qwen3.8-27b-fp8` the report is at
 - **Unified memory:** `--gpu-memory-utilization` carves from the whole 128 GB
   pool. `nvidia-smi` reports `N/A` for GPU memory — use `free -m`.
 - vLLM 0.24.0: MTP is `--speculative-config`, not `--num-speculative-tokens`.
+- **NGC `26.07-py3` ships `xgrammar==0.2.0`**, but vLLM 0.24.0's tool-calling
+  path needs `normalize_tool_choice` (added in xgrammar 0.2.4) — any request
+  with `"tools"` set 500s (`cannot import name 'normalize_tool_choice'`) on
+  the stock image. Any model that needs tool calling on this box needs the
+  same `--no-deps` xgrammar bump; see
+  `models/qwen3.8-27b-fp8/docker/Dockerfile.xgrammar024` for the pattern and
+  its `model.env`'s `VLLM_IMAGE` override for how to wire it in.
 - Models too big for one GB10 stay out (`Qwen3.8-Flash-Next`: `qwen4_exp`,
   ~180B MoE, ~186 GB in any quant, needs TP ≥ 8).
 

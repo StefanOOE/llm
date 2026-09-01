@@ -181,6 +181,56 @@ non-stock kernels, or two-box tensor-parallel setups). None of these are
 directly comparable to a stock NGC 26.07 run — treat our own bench numbers as
 authoritative once they exist, not these.
 
+## 2026-09-01: vLLM throughput gap vs. community reports (investigated, not closed)
+
+Deep web research into a possible llama.cpp evaluation (a separately
+deferred idea, not started) surfaced a more urgent, separate finding
+first: multiple community sources report
+single-stream gpt-oss-120b throughput on this exact hardware well above
+our own measured baseline (~11-12 tok/s):
+
+| Source | Config | Single-stream tok/s |
+|---|---|---|
+| This box (our sweep) | stock NGC 26.07 / vLLM 0.24.0, auto backend | ~11-12 |
+| ai-muninn.com blog | vLLM 0.17.1 "stock" | ~38 |
+| ai-muninn.com blog | vLLM 0.17.1 + `--mxfp4-layers moe,qkv,o,lm_head` + `--attention-backend FLASHINFER` (patched build) | ~59 (≈ their calculated bandwidth ceiling) |
+| NVIDIA dev forum | vLLM 0.17.0, TP=2, patched (`namake-taro/vllm-custom`) | ~80 |
+
+Investigated two of their levers directly on this box:
+
+1. **`--attention-backend FLASHINFER`: fails outright**, not just
+   unavailable-by-default. Real error:
+   ```
+   ValueError: Selected backend AttentionBackendEnum.FLASHINFER is not
+   valid for this configuration. Reason: ['attention sinks not supported']
+   ```
+   gpt-oss's attention-sink mechanism (part of its sliding-window design)
+   isn't supported by FlashInfer attention in this vLLM version. This
+   confirms `auto` picking TRITON_ATTN isn't a missed optimization — it's
+   the *only* backend that actually works here. Their higher numbers likely
+   depend on either an older vLLM/FlashInfer pairing that didn't have this
+   restriction, or a patched build that works around it.
+2. **`GPU_MEM_UTIL=0.90` + `--max-num-batched-tokens 8192`**: real but
+   modest gain, 11-12 -> **14.26 tok/s** (+20-25%), correctness-verified
+   (coherent `content`/`reasoning`). Nowhere close to the reported 38-59
+   range. Single spot-check only (one cold load, one workload) — **not**
+   adopted as the new default; would need a full re-sweep (all workloads,
+   check KV/host-memory headroom at 0.90 with a second model co-located)
+   before committing to it. See `model.env`'s `GPU_MEM_UTIL` comment.
+
+**Unresolved**: the bulk of the gap (11-14 tok/s here vs. ~38 tok/s
+"stock" elsewhere) doesn't have an identified cause yet. Candidates not
+yet ruled out: a real regression/difference between vLLM 0.17.x and 0.24.x
+for this specific MXFP4/Marlin/gpt-oss code path; a benchmark-methodology
+difference (their "tok/s" figures may be pure decode-phase measurements
+via a different tool, not `vllm bench serve`'s full-request-lifecycle
+`output_throughput`, though our own TTFT is small enough — ~230-350ms —
+that this alone shouldn't explain a 3x gap); or something specific to the
+NGC 26.07 image vs. a from-source/pip vLLM build. Worth another look if
+gpt-oss-120b's throughput becomes a real bottleneck for actual usage;
+not chased further here given the effort/benefit tradeoff of building or
+trusting an unofficial patched fork just to test further.
+
 ## Sources
 
 - Model card / config: <https://huggingface.co/openai/gpt-oss-120b>

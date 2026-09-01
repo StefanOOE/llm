@@ -36,6 +36,15 @@
 #  missing on purpose. Its actual first line is `if os.path.exists(model):
 #  return model` -- a local path (container-side, under /hf-cache/...) skips
 #  the whole hub check. See gpt-oss-120b/model.env for how it's resolved.
+#
+#  PREFIX_CACHING (optional, generate runner only): "1" adds
+#  --enable-prefix-caching, "0" adds --no-enable-prefix-caching, unset ->
+#  no flag at all (vLLM's own internal default, unchanged from before this
+#  var existed). Mirrors common/bench/run.py's own prefix_caching handling,
+#  which always sets one or the other explicitly per sweep config -- this
+#  var adds the "don't touch it" third state serving needs but the bench
+#  harness doesn't. See qwen3.8-27b-fp8/model.env for a benchmarked example
+#  (prefix_cache_ab suite: -25/-27% TTFT, +22% throughput under concurrency).
 # =============================================================================
 
 # -- docker (works with or without docker-group membership) --------------- #
@@ -102,10 +111,14 @@ assemble_args() {
     )
     VISION_DESC="n/a (pooling runner)"
   else
-    local spec=() vision=()
+    local spec=() vision=() prefix=()
     if [ "${MTP_TOKENS}" -gt 0 ]; then
       spec=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_TOKENS}}")
     fi
+    case "${PREFIX_CACHING:-}" in
+      1) prefix=(--enable-prefix-caching) ;;
+      0) prefix=(--no-enable-prefix-caching) ;;
+    esac
     if [ "${LANGUAGE_MODEL_ONLY}" = "1" ]; then
       vision=(--language-model-only)
       VISION_DESC="off (--language-model-only)"
@@ -127,6 +140,7 @@ assemble_args() {
       --kv-cache-dtype "$KV_CACHE_DTYPE"
       "${spec[@]}"
       "${vision[@]}"
+      "${prefix[@]}"
       --reasoning-parser "$REASONING_PARSER"
       --enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER"
       --tensor-parallel-size 1
@@ -172,6 +186,7 @@ EOF
   kv cache     : ${KV_CACHE_DTYPE}
   MTP          : ${MTP_TOKENS} draft token(s)$( [ "${MTP_TOKENS}" -eq 0 ] && echo '  (disabled)' )
   vision       : ${VISION_DESC}
+  prefix cache : $( case "${PREFIX_CACHING:-}" in 1) echo "on";; 0) echo "off (forced)";; *) echo "vLLM default";; esac )
   extra args   : ${EXTRA_VLLM_ARGS:-(none)}
   container    : ${CONTAINER}
   endpoint     : http://${HOST}:${PORT}/v1   (served as '${SERVED_NAME}')

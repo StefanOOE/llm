@@ -157,6 +157,33 @@ llama.cpp per its own README/discussion history; `llama-server`'s
 `--slot-save-path` disk-persisted KV cache is a real alternative to
 `--enable-prefix-caching` worth comparing if that round ever happens).
 
+## 2026-09-01: context raised 65536 -> 131072 for the Hermes agent
+
+The remote Hermes agent (`hermes-agent`, hits the vLLM on `:8000` as its
+backend) needs more than 65536 tokens for its autonomous runs. Raised
+`MAX_MODEL_LEN` 65536 -> 131072 in `model.env`.
+
+- **No YaRN**: `config.json` `text_config.max_position_embeddings` is 262144,
+  `rope_scaling` null. 131072 is well under native -> just the flag.
+- **Memory-neutral**: `--gpu-memory-utilization 0.65` carves a *fixed* slice
+  of the unified pool; `max_model_len` does not size the KV pool. Live logs:
+  `Available KV cache memory: 45.14 GiB` / `GPU KV cache size: 1,018,148
+  tokens` -- unchanged by this bump. Only the vLLM-estimated max concurrency
+  drops: 15.54x @ 65536 -> ~7.8x @ 131072, which is still far more than a
+  single agent needs (vLLM starts as long as one full-length request fits:
+  131072 << 1,018,148). `GPU_MEM_UTIL` / `MAX_NUM_SEQS` untouched; the
+  `bge-m3` co-tenant (0.12) is unaffected.
+- **Perf tradeoff accepted**: only matters when the context is actually
+  filled -- 131072 sits between the 64k row (22.6 tok/s, 32.9 s TTFT) and
+  the 256k row (12.9 tok/s, 117 s) of `model.env`'s context-scaling table.
+  Explicitly taken ("nicht soo wichtig fuer autonome agentic tasks").
+- Applied by `sudo systemctl restart llm-vllm@qwen3.8-27b-fp8` (`model.env`
+  is re-sourced on every start); survives reboot, no `install-service`
+  re-run -- same as the 2026-08-30 bump.
+- **Client side (not in this repo)**: the Hermes agent's own context-window
+  setting, on the machine running the agent, must also be raised to <=131072
+  to actually use the extra room.
+
 ## Sources
 
 - Model card: <https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8>

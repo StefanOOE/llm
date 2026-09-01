@@ -46,7 +46,7 @@ Weights and the vLLM compile cache live outside the repo:
 
 | slug | served as | port | endpoint | context | license | status |
 |---|---|---|---|---|---|---|
-| `qwen3.8-27b-fp8` | `qwen3.8-27b-uncensored` | 8000 | `/v1/chat/completions` | 65536 | Apache 2.0, uncensored | benchmark-tuned, in daily use |
+| `qwen3.8-27b-fp8` | `qwen3.8-27b-uncensored` | 8000 | `/v1/chat/completions` | 131072 | Apache 2.0, uncensored | benchmark-tuned, in daily use |
 | `gpt-oss-120b` | `gpt-oss-120b` | 8002 | `/v1/chat/completions` | 65536 | Apache 2.0, stock safety | benchmark-tuned |
 | `bge-m3` | `bge-m3` | 8001 | `/v1/embeddings` | 8192 | MIT | in use (embeddings for the litellm proxy) |
 

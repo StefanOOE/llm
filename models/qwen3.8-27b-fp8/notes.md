@@ -71,6 +71,92 @@ Both changes live in `model.env` (sourced fresh on every start by the
 systemd unit) — no `install-service` re-run was needed, and both survive a
 reboot as long as the local Docker image persists (see caveat above).
 
+## 2026-09-01: gap-closing sweep at the real production context
+
+Auditing `model.env` against its own cited data (prompted by "what other
+optimizations are there for qwen?") found the 2026-08-30 context bump to
+65536 had never actually been load-tested at production settings — the
+original 43-run sweep (2026-08-27/28) tuned `MTP_TOKENS`/`MAX_NUM_SEQS` at
+`max_model_len=32768`, and its context-scaling rows used bench-only
+`gpu_memory_utilization=0.80`/reduced `max_num_seqs`, not production's
+`0.65`/`32`. Five suites closed this and three smaller gaps:
+
+- **`prod_mtp_sweep_65k`**: production combo (65536 + 0.65 + 32) validated
+  together for the first time — works fine, no issues. Also re-settled
+  `MTP_TOKENS` at the correct context: 3 wins single-stream (+11%, the
+  deployment-representative metric — one agent, not 32 users), ties on
+  batch/saturate, loses ~8% on codegen_decode. Switched default 2 -> 3.
+  See `model.env`'s MTP block for the full table.
+- **`kv_dequant_cliff_check`**: a GB10-specific report (llama.cpp/GGML KV
+  quantization) found KV quant can get *slower* than f16 at deep context on
+  this bandwidth-rich unified-memory hardware ("dequantization cliff") —
+  worth checking since our own `kv_sweep` never tested deep enough. Result
+  at 65536 ctx: fp8 KV **wins decisively** (28.52 vs 22.41 tok/s, +27%; TPOT
+  63.2ms vs 96.3ms, -34%). Does not reproduce for vLLM's fp8 KV cache
+  (different kernel than GGML's blockwise dequant). No change to
+  `KV_CACHE_DTYPE`.
+- **`prefix_cache_ab`**: `--enable-prefix-caching` had never been A/B
+  tested (model.env asserted it was "off" by default with MTP — untrue,
+  live `--help=all` shows the real default is `None`/auto). Tested against
+  a workload shaped like the actual deployment (6000-token shared system
+  prompt/tool schema + short varying turn, not the harness's usual fully-
+  independent random prompts — needed a small additive `run.py` extension,
+  `--random-prefix-len`/`--random-range-ratio`). Clear win: TTFT -25% solo
+  (conc=1), -27% TTFT **and** +22% throughput under concurrency (conc=8).
+  **Not enabled by default yet** — `lib.sh`'s `generate` runner path has no
+  dedicated env var for this flag (only reachable via `EXTRA_VLLM_ARGS`
+  today); wiring a real `PREFIX_CACHING` knob is a tracked follow-up, not
+  bundled into this sweep.
+- **`seqs_sweep_ext_65k`**: model.env's own comment said "48-64 also fine;
+  >32 not tested." Now tested: throughput keeps climbing through 64 (32:
+  202.6 tok/s -> 48: 246.3 -> 64: 285.5 tok/s), no ceiling hit, no
+  regression (unlike gpt-oss-120b's own seqs sweep, which *did* regress
+  past its sweet spot). The real tradeoff is TTFT (2.4s -> 4.9s), not a
+  hard limit. `MAX_NUM_SEQS` stays 32 — this deployment is one agent, not a
+  batch workload, so the extra throughput headroom at 48/64 isn't needed.
+- **`moe_backend_probe`**: model is confirmed MoE + hybrid attention
+  (`qwen3_5`, see above), so `--moe-backend` is a real axis unlike a dense
+  model — never set before. Tried `triton` against `auto` (the only
+  candidate; `flashinfer_cutlass`/`flashinfer_trtllm` skipped per vLLM
+  issue #43507 — CUTLASS FP8 MoE broken on SM_120/SM_121, a hardware-class
+  issue; `deep_gemm` skipped, fights the box-wide mandatory
+  `VLLM_USE_DEEP_GEMM=0`). Mixed result (triton +9.6% single-stream, -7.7%
+  batch8_balanced) — no compelling reason to switch. `triton` was manually
+  curl-verified correct (non-null `content`/`reasoning`/`tool_calls`)
+  before being set aside, same correctness-gating rule as gpt-oss-120b's
+  backend sweep. `EXTRA_VLLM_ARGS` stays empty.
+
+**Operational note**: most of these suites hit the same externally-killed
+background wrapper issue documented in `gpt-oss-120b/notes.md` — a
+background sweep process gets killed (confirmed not the user, happened
+repeatedly across an otherwise-unrelated session) while the underlying
+container keeps loading/serving. Every affected suite was salvaged by
+letting the orphaned container finish, then either driving the remaining
+`vllm bench serve` calls directly via `docker exec` (same host/container
+path `run.py` itself uses) or waiting it out in the foreground, and folding
+results into `summary.csv` via `run.py`'s own `append_summary()` so they're
+indistinguishable from a normal run. No data lost, just extra steps.
+
+Full raw results: `bench/results/{prod_mtp_sweep_65k,kv_dequant_cliff_check,
+prefix_cache_ab,seqs_sweep_ext_65k,moe_backend_probe}_2026*/`.
+
+Also evaluated and explicitly **not** pursued this round: CUDA-graph/
+`--compilation-config` tuning (no existing signal either direction, large
+unexplored surface), KV-cache dtypes beyond fp8/auto like `fp8_e5m2`/
+`nvfp4` (the current fp8 choice already has an unmeasured accuracy question
+sitting under it — checkpoint has no k/v_scale — stacking a new unverified
+precision experiment on that is premature), and `bf16_spec_1` (cosmetic
+sweep-symmetry gap only, FP8 already decisively won weights).
+
+A user-flagged idea (llama.cpp as an alternative serving stack, motivated
+by the same KV-cache research above) is deliberately **out of scope** here
+and tracked as its own future planning round — see the plan file this
+sweep was executed from for what was found (the GB10-specific
+`croll83/llama.cpp-dgx` fork is itself already superseded by upstream
+llama.cpp per its own README/discussion history; `llama-server`'s
+`--slot-save-path` disk-persisted KV cache is a real alternative to
+`--enable-prefix-caching` worth comparing if that round ever happens).
+
 ## Sources
 
 - Model card: <https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8>

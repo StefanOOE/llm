@@ -1,8 +1,21 @@
 # Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 — notes
 
-**Status (2026-09-02): scaffolded, NOT yet benchmark-tuned.** Weights
-downloading. `model.env` knobs are reasoned starting points, not sweep
-results — run `bench/matrix.yaml`'s `overnight` suite and fold winners in.
+**Status (2026-09-02): scaffolded + smoke-tested, NOT yet benchmark-tuned.**
+Smoke test (qwen3.8 stopped):
+- serves, `/v1/models` ctx 262144, clean code output.
+- **Decode ~57 tok/s** sustained (600 tok in 10.5 s) — **8.5x** the
+  Qwen2.5-Coder-32B dense it replaces (~6.7 tok/s). This is the point.
+- **Tool calling `tool_choice: "auto"` works 3/3** (clean `tool_calls`,
+  name + args) with the `qwen3_coder` parser — Qwen2.5-Coder-32B failed 3/3.
+- Long context: a 105,804-token prompt answered correctly, 66 s TTFT.
+- Startup: weights 29.1 GiB / 189 s. `auto` picked **TRITON** Fp8 MoE +
+  **FLASHINFER** attention.
+- **KV pool thin at deep context:** at `GPU_MEM_UTIL 0.40`, 16.56 GiB /
+  361,712 tokens / **1.38x concurrency @ 262144**. Bumped default to 0.50;
+  the `context_scaling` sweep settles GMU vs the 262144-vs-131072 default.
+
+`model.env` numeric knobs are still starting points — run `bench/matrix.yaml`'s
+`overnight` suite and fold winners in.
 
 Role on this box: the **quality** coding model (the **performance** one is
 `deepseek-coder-v2-lite-fp8`). On-demand only — **not** a systemd service;
@@ -59,19 +72,18 @@ most coding evals. This is the same MoE trade the box already makes for
   block-FP8 MoE on SM120/121 (vLLM #43507) — expect the same here. Probe
   `auto` vs `triton`, correctness-gated.
 
-## Open questions for the sweep / first start
+## Open questions for the sweep
 
-1. **Tool calling with `tool_choice: "auto"`** — works out of the box, or
-   need `--chat-template`?
-2. **Actual decode speed** — expect ~40-60 tok/s single-stream (MoE, 3.3B
-   active). Confirm it clears the Qwen2.5-Coder-32B bar by a wide margin.
-3. **Context default** — 262144 native is enabled; is the KV pool / TTFT at
-   deep context reasonable, or drop to 131072 like the other models?
-4. **KV dtype** — `fp8` vs `auto` (`kv_sweep`).
-5. **`max_num_seqs`** sweet spot (`seqs_sweep`) — MoE regression watch.
-6. **MoE backend** — `auto` vs `triton`, correctness-gated.
+1. **RESOLVED: tool calling `tool_choice: "auto"`** — works 3/3, no override.
+2. **RESOLVED: decode speed** — ~57 tok/s, clears the 32B-dense bar 8.5x.
+3. **RESOLVED: MoE backend** — `auto` picks TRITON; `moe_backend_probe`
+   re-checks vs forced.
+4. **Context default** — keep 262144 (needs GMU ~0.5 for headroom) or drop
+   to 131072? `context_scaling` decides.
+5. **KV dtype** — `fp8` vs `auto` (`kv_sweep`).
+6. **`max_num_seqs`** sweet spot (`seqs_sweep`) — MoE regression watch.
 7. **Prefix caching** win size on coding traffic.
-8. **`GPU_MEM_UTIL`** — derive from `server_kv_cache_gib` / `mem_ready_mb`.
+8. **`GPU_MEM_UTIL`** — 0.50 placeholder; derive from the sweep.
 
 ## Sources
 

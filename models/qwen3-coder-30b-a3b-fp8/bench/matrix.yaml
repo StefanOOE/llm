@@ -31,8 +31,11 @@ defaults:
     HF_HUB_OFFLINE: "1"
   config_defaults:
     model: fp8
-    gpu_memory_utilization: 0.40
-    max_model_len: 262144
+    gpu_memory_utilization: 0.50
+    # 131072 base: KV-headroom-safe for the throughput suites regardless of
+    # dtype (bf16 KV @ 262144 needs ~24 GiB -> won't fit at these GMU values).
+    # Only context_scaling / ctx_262k raise it.
+    max_model_len: 131072
     max_num_seqs: 16
     kv_cache_dtype: fp8
     spec: null

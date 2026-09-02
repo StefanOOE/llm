@@ -45,6 +45,28 @@
 #  var adds the "don't touch it" third state serving needs but the bench
 #  harness doesn't. See qwen3.8-27b-fp8/model.env for a benchmarked example
 #  (prefix_cache_ab suite: -25/-27% TTFT, +22% throughput under concurrency).
+#
+#  REASONING_PARSER (optional, generate runner only): passed as
+#  --reasoning-parser when non-empty; unset/empty -> flag omitted entirely.
+#  For a non-thinking model (e.g. a *-Coder-*-Instruct checkpoint with no
+#  reasoning channel) leave it unset rather than pointing it at some other
+#  model's parser -- there's no reasoning_start/end token for it to find.
+#
+#  TOOL_CALL_PARSER (optional, generate runner only): when non-empty, adds
+#  BOTH --enable-auto-tool-choice and --tool-call-parser (they're a pair --
+#  auto-tool-choice with no parser, or a parser with tool-choice off, are
+#  both meaningless). Unset/empty -> neither flag, i.e. tool calling stays
+#  off. Use this for a model with no vLLM-supported tool-call format on this
+#  box rather than guessing a parser and letting `tools` requests 500.
+#
+#  TRUST_REMOTE_CODE (optional, generate runner only, default "1"): "1" adds
+#  --trust-remote-code (the long-standing default), "0" omits it. Set to "0"
+#  for a checkpoint whose config.json carries an `auto_map` pointing at a
+#  DIFFERENT repo's custom modeling code (e.g. a re-quant of a base model):
+#  with HF_HUB_OFFLINE=1 that code isn't cached and AutoConfig.from_pretrained
+#  hard-fails trying to fetch it, even though vLLM has a NATIVE class for the
+#  architecture and doesn't need the remote code at all. See
+#  deepseek-coder-v2-lite-fp8/model.env.
 # =============================================================================
 
 # -- docker (works with or without docker-group membership) --------------- #
@@ -128,12 +150,17 @@ assemble_args() {
       VISION_DESC="on  (image<=${MM_IMAGE_LIMIT}, video<=${MM_VIDEO_LIMIT})"
     fi
 
+    local reason=() tools=() trc=()
+    [ -n "${REASONING_PARSER:-}" ] && reason=(--reasoning-parser "${REASONING_PARSER}")
+    [ -n "${TOOL_CALL_PARSER:-}" ] && tools=(--enable-auto-tool-choice --tool-call-parser "${TOOL_CALL_PARSER}")
+    [ "${TRUST_REMOTE_CODE:-1}" = "1" ] && trc=(--trust-remote-code)
+
     VLLM_ARGS=(
       vllm serve "${VLLM_MODEL_PATH:-$MODEL}"
       --served-model-name "$SERVED_NAME"
       --host "$HOST" --port "$PORT"
       --api-key "$API_KEY"
-      --trust-remote-code
+      "${trc[@]}"
       --max-model-len "$MAX_MODEL_LEN"
       --max-num-seqs "$MAX_NUM_SEQS"
       --gpu-memory-utilization "$GPU_MEM_UTIL"
@@ -141,8 +168,8 @@ assemble_args() {
       "${spec[@]}"
       "${vision[@]}"
       "${prefix[@]}"
-      --reasoning-parser "$REASONING_PARSER"
-      --enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER"
+      "${reason[@]}"
+      "${tools[@]}"
       --tensor-parallel-size 1
     )
   fi

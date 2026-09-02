@@ -40,7 +40,7 @@ models/
 │   ├── model.env           benchmark-tuned knobs; KV auto (fp8 fails on SM121 MLA), corrected tokenizer
 │   ├── notes.md            MoE/MLA facts, 3 fixed start-blockers, sweep results
 │   ├── serve               thin wrapper -> common/serve.sh with this dir
-│   ├── tokenizer/          corrected tokenizer_config (FP8 repo's breaks the ByteLevel decoder)
+│   ├── tokenizer/          corrected tokenizer_config.json (FP8 repo's breaks the ByteLevel decoder; model.env stages it + tokenizer.json from the snapshot)
 │   └── bench/matrix.yaml    moe_backend / mla_kv / seqs / prefix / context suites
 └── bge-m3/            XLM-RoBERTa encoder, 1024-dim multilingual embeddings   (RUNNER=pooling)
     ├── model.env       identity + pooling knobs (no chat/generate flags)

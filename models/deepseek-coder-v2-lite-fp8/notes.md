@@ -74,11 +74,15 @@ as the other on-demand models.
   vocab uses GPT-2 byte markers (`Ġ`/`Ċ`), so every space and newline is
   dropped from the output — `"Helloworlddeffoo():"`, verified 2026-09-01
   standalone (`AutoTokenizer` on both the FP8 repo AND the original
-  `deepseek-ai` repo) and via vLLM. Fix: `./tokenizer/` holds a corrected
-  `tokenizer_config.json` (`tokenizer_class: "PreTrainedTokenizerFast"` →
-  respects the embedded ByteLevel decoder) + the original `tokenizer.json`;
-  `model.env` stages it into the mounted HF cache on first start. `decode()`
-  then returns `"Hello world\n  def foo():"` and vLLM output is clean.
+  `deepseek-ai` repo) and via vLLM. Fix: `model.env` stages a corrected
+  tokenizer dir into the mounted HF cache and points `--tokenizer` at it:
+  `tokenizer.json` copied verbatim from the model's own snapshot (its
+  ByteLevel decoder is already correct — identical to `deepseek-ai`'s), plus
+  `./tokenizer/tokenizer_config.json` from this repo (the FP8 repo's file
+  with just `tokenizer_class` → `"PreTrainedTokenizerFast"`, so the generic
+  fast tokenizer keeps `tokenizer.json`'s decoder instead of swapping in the
+  Llama one). `decode()` then returns `"Hello world\n  def foo():"` and vLLM
+  output is clean.
 - **MLA KV dtype: `auto` (bf16) — the only option on this box.** Both FP8
   KV paths fail:
   - `fp8_ds_mla`: `ValueError: No valid attention backend found for cuda ...

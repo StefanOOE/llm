@@ -176,7 +176,8 @@ backend) needs more than 65536 tokens for its autonomous runs. Raised
 - **Perf tradeoff accepted**: only matters when the context is actually
   filled -- 131072 sits between the 64k row (22.6 tok/s, 32.9 s TTFT) and
   the 256k row (12.9 tok/s, 117 s) of `model.env`'s context-scaling table.
-  Explicitly taken ("nicht soo wichtig fuer autonome agentic tasks").
+  Explicitly taken (deep-context speed is not important for autonomous
+  agentic tasks).
 - Applied by `sudo systemctl restart llm-vllm@qwen3.8-27b-fp8` (`model.env`
   is re-sourced on every start); survives reboot, no `install-service`
   re-run -- same as the 2026-08-30 bump.

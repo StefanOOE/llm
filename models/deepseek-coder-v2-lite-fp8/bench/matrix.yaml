@@ -1,0 +1,148 @@
+# Benchmark matrix for RedHatAI/DeepSeek-Coder-V2-Lite-Instruct-FP8 on NVIDIA DGX Spark (GB10)
+#
+#   sg docker -c ".hf-venv/bin/python common/bench/run.py --model models/deepseek-coder-v2-lite-fp8 --suite <name>"
+#
+# Image / caches / repo id / served name / port come from  common/box.env +
+# models/deepseek-coder-v2-lite-fp8/model.env . This file is ONLY the sweep.
+#
+# GB10 + this model notes (see ../notes.md):
+#  - 128 GB *unified* LPDDR5x: --gpu-memory-utilization carves from the whole pool.
+#  - VLLM_USE_DEEP_GEMM=0 mandatory (asserts on sm_121); set in box.env + env below.
+#  - MoE (64+2 experts / 6 active) => --moe-backend IS a real axis.
+#  - MLA attention => KV cache is a tiny latent, long context is cheap. The
+#    MLA-specific `fp8_ds_mla` KV dtype FAILS on this box (no MLA attention
+#    backend supports it on SM121) -- default is `auto`; mla_kv_check A/Bs
+#    auto vs plain fp8.
+#  - YaRN (factor 40) is baked into the checkpoint config -> NO rope override,
+#    just max_model_len <= 163840.
+#  - No MTP head (V2) -> no spec-decode axis.
+#  - Tool calling: the checkpoint's chat template has no tool support -> all
+#    suites run with tool calling OFF (see ../notes.md). Stock NGC image.
+
+defaults:
+  models:
+    fp8: {path: RedHatAI/DeepSeek-Coder-V2-Lite-Instruct-FP8}
+  common_flags:
+    - --language-model-only
+    # corrected tokenizer (FP8 repo's tokenizer_config breaks the ByteLevel
+    #   decoder -> dropped spaces; see ../model.env / ../notes.md). model.env
+    #   stages ./tokenizer/ into the HF cache; a prior `./serve start` (or
+    #   `models/<slug>/serve status`) materializes this path.
+    - --tokenizer=/hf-cache/tokenizer-fixes/deepseek-coder-v2-lite
+    # NO --trust-remote-code: checkpoint auto_map points at another repo's
+    #   custom code -> fetch fails offline; vLLM's native deepseek_v2 class
+    #   doesn't need it (see ../notes.md / model.env).
+    # no --reasoning-parser (not a thinking model), no tool-call flags
+    #   (checkpoint chat template has no tool support -- see ../notes.md)
+  env:
+    VLLM_USE_DEEP_GEMM: "0"
+    LANG: C.UTF-8
+    LC_ALL: C.UTF-8
+    HF_HUB_OFFLINE: "1"
+  config_defaults:
+    model: fp8
+    gpu_memory_utilization: 0.30
+    max_model_len: 131072
+    max_num_seqs: 8
+    kv_cache_dtype: auto
+    spec: null
+    prefix_caching: false
+    max_num_batched_tokens: null
+    extra_flags: []
+  workload_defaults:
+    input_len: 1024
+    output_len: 1024
+    num_prompts: 16
+    concurrency: 16
+    request_rate: inf
+    ignore_eos: true
+    warmups: 3
+    prefix_len: 0
+    random_range_ratio: 0.0
+  server_startup_timeout_s: 1200
+  teardown_pause_s: 12
+
+# ----------------------------------------------------------------------------
+workloads:
+  smoke_stream: {input_len: 256, output_len: 256, num_prompts: 3, concurrency: 1, warmups: 1}
+  smoke_batch:  {input_len: 512, output_len: 256, num_prompts: 8, concurrency: 8, warmups: 1}
+
+  single_stream:   {input_len: 512,  output_len: 1024, num_prompts: 3,  concurrency: 1}
+  batch4_balanced: {input_len: 1024, output_len: 1024, num_prompts: 12, concurrency: 4}
+  batch8_balanced: {input_len: 1024, output_len: 1024, num_prompts: 16, concurrency: 8}
+  codegen_decode:  {input_len: 1024, output_len: 4096, num_prompts: 8,  concurrency: 8}
+
+  agent_turn_solo:     {prefix_len: 8000, input_len: 400, output_len: 600,
+                        num_prompts: 20, concurrency: 1, random_range_ratio: 0.3}
+  agent_turn_parallel: {prefix_len: 8000, input_len: 400, output_len: 600,
+                        num_prompts: 40, concurrency: 8, random_range_ratio: 0.3}
+
+  # context scaling -- MLA KV is cheap, so n stays higher than the other models' rows
+  ctx8k_load:   {input_len: 3600,  output_len: 800,  num_prompts: 12, concurrency: 8}
+  ctx32k_load:  {input_len: 14000, output_len: 3000, num_prompts: 8,  concurrency: 6}
+  ctx65k_load:  {input_len: 28000, output_len: 4000, num_prompts: 6,  concurrency: 4}
+  ctx131k_load: {input_len: 56000, output_len: 8000, num_prompts: 3,  concurrency: 2}
+
+# ----------------------------------------------------------------------------
+configs:
+  # --- MoE backend probe (correctness-gated: curl a chat completion against
+  #     EVERY config, confirm non-null content, before trusting throughput).
+  #     deep_gemm excluded (box-wide VLLM_USE_DEEP_GEMM=0). ---
+  backend_auto:    {extra_flags: []}
+  backend_triton:  {extra_flags: [--moe-backend, triton]}
+  backend_cutlass: {extra_flags: [--moe-backend, cutlass]}
+
+  # --- MLA KV dtype (fp8_ds_mla excluded -- no backend supports it here) ---
+  kv_auto: {kv_cache_dtype: auto}
+  kv_fp8:  {kv_cache_dtype: fp8}
+
+  # --- max-num-seqs (MoE: watch for regression past the sweet spot) ---
+  seqs_1:  {max_num_seqs: 1}
+  seqs_2:  {max_num_seqs: 2}
+  seqs_4:  {max_num_seqs: 4}
+  seqs_8:  {max_num_seqs: 8}
+  seqs_16: {max_num_seqs: 16}
+
+  # --- prefix caching A/B ---
+  prefix_off: {prefix_caching: false}
+  prefix_on:  {prefix_caching: true}
+
+  # --- context scaling (MLA -> mostly a latency-curve question) ---
+  ctx_8k:   {max_model_len: 8192,   max_num_seqs: 16}
+  ctx_32k:  {max_model_len: 32768,  max_num_seqs: 12}
+  ctx_65k:  {max_model_len: 65536,  max_num_seqs: 8}
+  ctx_131k: {max_model_len: 131072, max_num_seqs: 4}
+
+# ----------------------------------------------------------------------------
+suites:
+  smoke:
+    - [backend_auto, [smoke_stream, smoke_batch]]
+
+  moe_backend_probe:
+    - [backend_auto,    [single_stream, batch8_balanced]]
+    - [backend_triton,  [single_stream, batch8_balanced]]
+    - [backend_cutlass, [single_stream, batch8_balanced]]
+
+  mla_kv_check:
+    - [kv_auto, [single_stream, batch8_balanced, codegen_decode, ctx65k_load]]
+    - [kv_fp8,  [single_stream, batch8_balanced, codegen_decode, ctx65k_load]]
+
+  seqs_sweep:
+    - [seqs_1,  [single_stream, batch4_balanced, codegen_decode]]
+    - [seqs_2,  [single_stream, batch4_balanced, codegen_decode]]
+    - [seqs_4,  [single_stream, batch4_balanced, codegen_decode]]
+    - [seqs_8,  [single_stream, batch4_balanced, codegen_decode]]
+    - [seqs_16, [single_stream, batch4_balanced, codegen_decode]]
+
+  prefix_cache_ab:
+    - [prefix_off, [agent_turn_solo, agent_turn_parallel]]
+    - [prefix_on,  [agent_turn_solo, agent_turn_parallel]]
+
+  context_scaling:
+    - [ctx_8k,   [ctx8k_load]]
+    - [ctx_32k,  [ctx32k_load]]
+    - [ctx_65k,  [ctx65k_load]]
+    - [ctx_131k, [ctx131k_load]]
+
+  overnight:
+    include: [moe_backend_probe, mla_kv_check, seqs_sweep, prefix_cache_ab, context_scaling]

@@ -1,0 +1,158 @@
+# Benchmark matrix for RedHatAI/Qwen2.5-Coder-32B-Instruct-FP8-dynamic on NVIDIA DGX Spark (GB10)
+#
+#   sg docker -c ".hf-venv/bin/python common/bench/run.py --model models/qwen2.5-coder-32b-fp8 --suite <name>"
+#
+# Image / caches / repo id / served name / port come from  common/box.env +
+# models/qwen2.5-coder-32b-fp8/model.env . This file is ONLY the sweep.
+#
+# GB10 + this model notes (see ../notes.md):
+#  - 128 GB *unified* LPDDR5x: --gpu-memory-utilization carves from the whole pool.
+#  - VLLM_USE_DEEP_GEMM=0 mandatory (asserts on sm_121); set in box.env + env below.
+#  - DENSE model, no MoE / no MTP -> no moe-backend and no spec-decode axis.
+#  - FULL attention, 64 layers, 8 KV heads, head_dim 128 => ~128 KiB/token fp8 KV,
+#    ~16 GiB per full-length 131072 sequence. Context configs carry
+#    gpu_memory_utilization up as max_model_len grows.
+#  - Context > 32768 needs STATIC YaRN via --hf-overrides (this vLLM build has
+#    no --rope-scaling flag). The override lives in config_defaults.extra_flags
+#    so every config gets it; the `yarn_off_native` config clears it to measure
+#    the short-prompt cost of static YaRN.
+#  - Tool calling correctness (hermes parser) is NOT checked by `vllm bench
+#    serve` (it only counts tokens) -- curl a `tools` request manually once.
+
+defaults:
+  models:
+    fp8: {path: RedHatAI/Qwen2.5-Coder-32B-Instruct-FP8-dynamic}
+  common_flags:
+    - --language-model-only
+    - --trust-remote-code
+    - --enable-auto-tool-choice
+    - --tool-call-parser=hermes
+  env:
+    VLLM_USE_DEEP_GEMM: "0"
+    LANG: C.UTF-8
+    LC_ALL: C.UTF-8
+    HF_HUB_OFFLINE: "1"
+  config_defaults:
+    model: fp8
+    gpu_memory_utilization: 0.62
+    max_model_len: 131072
+    max_num_seqs: 8
+    kv_cache_dtype: fp8
+    spec: null                    # dense, no MTP head
+    prefix_caching: false
+    max_num_batched_tokens: null
+    # STATIC YaRN to 131072 (factor 4). Compact JSON, single-token value.
+    extra_flags: ['--hf-overrides', '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}']
+  workload_defaults:
+    input_len: 1024
+    output_len: 1024
+    num_prompts: 16
+    concurrency: 16
+    request_rate: inf
+    ignore_eos: true
+    warmups: 3
+    prefix_len: 0
+    random_range_ratio: 0.0
+  server_startup_timeout_s: 1200
+  teardown_pause_s: 12
+
+# ----------------------------------------------------------------------------
+workloads:
+  # --- harness validation ---
+  smoke_stream: {input_len: 256, output_len: 256, num_prompts: 3, concurrency: 1, warmups: 1}
+  smoke_batch:  {input_len: 512, output_len: 256, num_prompts: 8, concurrency: 8, warmups: 1}
+
+  # --- short throughput/latency workloads (same shape at every config) ---
+  single_stream:   {input_len: 512,  output_len: 1024, num_prompts: 3,  concurrency: 1}
+  batch4_balanced: {input_len: 1024, output_len: 1024, num_prompts: 12, concurrency: 4}
+  batch8_balanced: {input_len: 1024, output_len: 1024, num_prompts: 16, concurrency: 8}
+  codegen_decode:  {input_len: 1024, output_len: 4096, num_prompts: 8,  concurrency: 8}
+
+  # --- agent/coding-shaped: large shared prefix (repo tree + open files +
+  #     system prompt) + short varying turn. Exercises prefix caching. ---
+  agent_turn_solo:     {prefix_len: 8000, input_len: 400, output_len: 600,
+                        num_prompts: 20, concurrency: 1, random_range_ratio: 0.3}
+  agent_turn_parallel: {prefix_len: 8000, input_len: 400, output_len: 600,
+                        num_prompts: 40, concurrency: 8, random_range_ratio: 0.3}
+
+  # --- context-scaling (input ~45% of ctx; n scaled to keep KV real) ---
+  ctx8k_load:   {input_len: 3600,   output_len: 800,  num_prompts: 12, concurrency: 8}
+  ctx32k_load:  {input_len: 14000,  output_len: 3000, num_prompts: 6,  concurrency: 4}
+  ctx65k_load:  {input_len: 28000,  output_len: 4000, num_prompts: 4,  concurrency: 3}
+  ctx131k_load: {input_len: 56000,  output_len: 8000, num_prompts: 2,  concurrency: 2}
+  ctx256k_load: {input_len: 115000, output_len: 8000, num_prompts: 1,  concurrency: 1}
+
+# ----------------------------------------------------------------------------
+configs:
+  # --- KV cache dtype ---
+  kv_auto: {kv_cache_dtype: auto}
+  kv_fp8:  {kv_cache_dtype: fp8}
+
+  # --- max-num-seqs (on-demand few-user model, expect a low sweet spot) ---
+  seqs_1:  {max_num_seqs: 1}
+  seqs_4:  {max_num_seqs: 4}
+  seqs_8:  {max_num_seqs: 8}
+  seqs_16: {max_num_seqs: 16}
+
+  # --- static-YaRN short-prompt cost: same workloads, YaRN on vs native 32768 ---
+  yarn_on:         {max_model_len: 131072}
+  yarn_off_native: {max_model_len: 32768, extra_flags: []}
+
+  # --- prefix caching A/B (agent-shaped workloads) ---
+  prefix_off: {prefix_caching: false}
+  prefix_on:  {prefix_caching: true}
+
+  # --- context scaling (YaRN factor 4 stays on; gmu/seqs scaled per row) ---
+  ctx_8k:   {max_model_len: 8192,   max_num_seqs: 16, gpu_memory_utilization: 0.62}
+  ctx_32k:  {max_model_len: 32768,  max_num_seqs: 8,  gpu_memory_utilization: 0.62}
+  ctx_65k:  {max_model_len: 65536,  max_num_seqs: 4,  gpu_memory_utilization: 0.70}
+  ctx_131k: {max_model_len: 131072, max_num_seqs: 2,  gpu_memory_utilization: 0.78}
+
+  # --- 256k probe: factor 8 YaRN, untested by Qwen. Data point only. ---
+  ctx_256k: {max_model_len: 262144, max_num_seqs: 1, gpu_memory_utilization: 0.88,
+             extra_flags: ['--hf-overrides', '{"rope_scaling":{"rope_type":"yarn","factor":8.0,"original_max_position_embeddings":32768}}']}
+
+  # --- prefill throughput on long code prompts ---
+  batched_2048: {max_num_batched_tokens: 2048}
+  batched_4096: {max_num_batched_tokens: 4096}
+  batched_8192: {max_num_batched_tokens: 8192}
+
+# ----------------------------------------------------------------------------
+suites:
+  smoke:
+    - [seqs_8, [smoke_stream, smoke_batch]]
+
+  kv_sweep:
+    - [kv_auto, [single_stream, batch8_balanced, codegen_decode]]
+    - [kv_fp8,  [single_stream, batch8_balanced, codegen_decode]]
+
+  seqs_sweep:
+    - [seqs_1,  [single_stream, batch4_balanced, codegen_decode]]
+    - [seqs_4,  [single_stream, batch4_balanced, codegen_decode]]
+    - [seqs_8,  [single_stream, batch4_balanced, codegen_decode]]
+    - [seqs_16, [single_stream, batch4_balanced, codegen_decode]]
+
+  yarn_cost:
+    - [yarn_off_native, [single_stream, batch8_balanced, codegen_decode]]
+    - [yarn_on,         [single_stream, batch8_balanced, codegen_decode]]
+
+  prefix_cache_ab:
+    - [prefix_off, [agent_turn_solo, agent_turn_parallel]]
+    - [prefix_on,  [agent_turn_solo, agent_turn_parallel]]
+
+  context_scaling:
+    - [ctx_8k,   [ctx8k_load]]
+    - [ctx_32k,  [ctx32k_load]]
+    - [ctx_65k,  [ctx65k_load]]
+    - [ctx_131k, [ctx131k_load]]
+
+  ctx_256k_probe:
+    - [ctx_256k, [ctx256k_load]]
+
+  batched_tokens_sweep:
+    - [batched_2048, [codegen_decode]]
+    - [batched_4096, [codegen_decode]]
+    - [batched_8192, [codegen_decode]]
+
+  overnight:
+    include: [kv_sweep, seqs_sweep, yarn_cost, prefix_cache_ab, context_scaling, ctx_256k_probe, batched_tokens_sweep]

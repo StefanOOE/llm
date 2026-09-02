@@ -1,0 +1,324 @@
+#!/usr/bin/env python3
+"""llmctl -- interactive terminal control for the models in this repo.
+
+Lists every model under models/<slug>/, shows which are running, and lets you
+toggle one by typing its number: running -> stop, stopped -> start. A start is
+refused up front if the unified-memory pool can't hold it. Ctrl-C quits.
+
+    ./llmctl
+
+Wraps the same machinery as the CLI:
+  - systemd-managed models (llm-vllm@<slug> enabled) -> sudo systemctl start|stop
+  - on-demand models                                  -> models/<slug>/serve start|stop
+
+The per-model memory reservation is read from GPU_MEM_UTIL in each
+models/<slug>/model.env -- the same fraction of the 128 GB pool vLLM carves.
+No second config file.
+"""
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO / "common" / "bench"))
+from _env import parse_env_file  # noqa: E402  (repo-local, see common/bench/_env.py)
+
+# Max sum of GPU_MEM_UTIL across running models. The rest of the 128 GB pool is
+# host headroom (~0.10 = ~13 GB). Raise it if you knowingly want a tighter fit
+# (e.g. gpt-oss-120b at 0.85 next to bge-m3 at 0.12 = 0.97).
+POOL_BUDGET = 0.90
+
+TEMPLATE_UNIT = "/etc/systemd/system/llm-vllm@.service"
+
+BOX = parse_env_file(REPO / "common" / "box.env")
+POOL_GB = int(BOX.get("BOX_UNIFIED_MEM_GB", "128"))
+
+RESET, BOLD, DIM = "\x1b[0m", "\x1b[1m", "\x1b[2m"
+GREEN, YELLOW, RED = "\x1b[32m", "\x1b[33m", "\x1b[31m"
+
+
+# --------------------------------------------------------------------------- #
+# docker (direct, or via the docker group)
+# --------------------------------------------------------------------------- #
+def _docker_mode() -> str:
+    if subprocess.run(["docker", "info"], capture_output=True).returncode == 0:
+        return "direct"
+    if subprocess.run(["sg", "docker", "-c", "docker info"], capture_output=True).returncode == 0:
+        return "sg"
+    sys.exit("error: cannot reach the Docker daemon (not in the 'docker' group?).")
+
+
+DOCKER_MODE = _docker_mode()
+
+
+def _shq(s: str) -> str:
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
+def docker(*args: str) -> subprocess.CompletedProcess:
+    if DOCKER_MODE == "direct":
+        return subprocess.run(["docker", *args], capture_output=True, text=True)
+    return subprocess.run(
+        ["sg", "docker", "-c", "docker " + " ".join(_shq(a) for a in args)],
+        capture_output=True, text=True,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# model discovery
+# --------------------------------------------------------------------------- #
+@dataclass
+class Model:
+    slug: str
+    served: str
+    port: int
+    gmu: float
+    startup: int
+    role: str
+
+    @property
+    def container(self) -> str:
+        return f"vllm-{self.slug}"
+
+    @property
+    def unit(self) -> str:
+        return f"llm-vllm@{self.slug}"
+
+
+def discover() -> list[Model]:
+    out: list[Model] = []
+    for d in sorted((REPO / "models").iterdir()):
+        env_path = d / "model.env"
+        if not env_path.is_file():
+            continue
+        env = parse_env_file(env_path)
+        if "PORT" not in env or "GPU_MEM_UTIL" not in env:
+            continue
+        role_m = re.search(r"^#\s*llmctl:\s*(.+?)\s*$", env_path.read_text(), re.M)
+        out.append(Model(
+            slug=d.name,
+            served=env.get("SERVED_NAME", d.name),
+            port=int(env["PORT"]),
+            gmu=float(env["GPU_MEM_UTIL"]),
+            startup=int(env.get("STARTUP_TIMEOUT", "1200")),
+            role=role_m.group(1) if role_m else "",
+        ))
+    return sorted(out, key=lambda m: m.port)
+
+
+# --------------------------------------------------------------------------- #
+# state
+# --------------------------------------------------------------------------- #
+def container_states() -> dict[str, tuple[str, str]]:
+    """slug -> (docker .State, human .Status). Missing container -> absent."""
+    p = docker("ps", "-a", "--format", "{{.Names}}\t{{.State}}\t{{.Status}}")
+    res: dict[str, tuple[str, str]] = {}
+    for line in p.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3 and parts[0].startswith("vllm-"):
+            res[parts[0][len("vllm-"):]] = (parts[1], parts[2])
+    return res
+
+
+def state_of(m: Model, states: dict[str, tuple[str, str]]) -> str:
+    st = states.get(m.slug)
+    if not st or st[0] != "running":
+        return "stopped"
+    status = st[1]
+    if "(healthy)" in status:
+        return "healthy"
+    if "health: starting" in status:
+        return "starting"
+    if "(unhealthy)" in status:
+        return "unhealthy"
+    return "running"
+
+
+RUNNING_STATES = {"healthy", "starting", "running", "unhealthy"}
+
+
+def systemd_managed(m: Model) -> bool:
+    """Mirror of common/lib.sh systemd_owns(): the template unit exists and the
+    instance is active/activating or enabled."""
+    if not os.path.exists(TEMPLATE_UNIT):
+        return False
+    act = subprocess.run(["systemctl", "is-active", m.unit],
+                         capture_output=True, text=True).stdout.strip()
+    if act in ("active", "activating"):
+        return True
+    en = subprocess.run(["systemctl", "is-enabled", m.unit],
+                        capture_output=True, text=True).stdout.strip()
+    return en == "enabled"
+
+
+def health_ok(port: int) -> bool:
+    try:
+        with urllib.request.urlopen(f"http://localhost:{port}/health", timeout=3) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+# --------------------------------------------------------------------------- #
+# fit check
+# --------------------------------------------------------------------------- #
+def running_total(models: list[Model], states: dict, exclude: str | None = None) -> float:
+    return round(sum(
+        m.gmu for m in models
+        if m.slug != exclude and state_of(m, states) in RUNNING_STATES
+    ), 3)
+
+
+def fits(m: Model, models: list[Model], states: dict) -> tuple[bool, float, list[Model]]:
+    total = running_total(models, states, exclude=m.slug)
+    ok = round(total + m.gmu, 3) <= POOL_BUDGET
+    blockers = [x for x in models
+               if x.slug != m.slug and state_of(x, states) in RUNNING_STATES]
+    return ok, total, blockers
+
+
+# --------------------------------------------------------------------------- #
+# actions
+# --------------------------------------------------------------------------- #
+def _run_streaming(argv: list[str]) -> int:
+    """Run a start/stop command, echoing its output, returning the exit code.
+    A Ctrl-C stops us waiting but leaves the container/unit alone."""
+    print(f"  {DIM}$ {' '.join(argv)}{RESET}\n")
+    proc = subprocess.Popen(argv, cwd=str(REPO))
+    try:
+        return proc.wait()
+    except KeyboardInterrupt:
+        print(f"\n  {YELLOW}detached — the container keeps going in the background.{RESET}")
+        raise
+
+
+def do_start(m: Model, models: list[Model], states: dict) -> None:
+    ok, total, blockers = fits(m, models, states)
+    if not ok:
+        print(f"  {RED}✗ won't fit:{RESET} {total:.2f} (running) + {m.gmu:.2f} "
+              f"({m.slug}) = {total + m.gmu:.2f} > {POOL_BUDGET:.2f} budget")
+        if blockers:
+            print("    running: " + ", ".join(f"{b.slug} ({b.gmu:.2f})" for b in blockers))
+            big = max(blockers, key=lambda b: b.gmu)
+            idx = models.index(big) + 1
+            print(f"    stop one first — e.g.  {BOLD}{idx}{RESET}  ({big.slug})")
+        return
+
+    print(f"  starting {BOLD}{m.slug}{RESET}  "
+          f"({DIM}cold start: up to ~{m.startup // 60} min{RESET})")
+    if systemd_managed(m):
+        rc = _run_streaming(["sudo", "systemctl", "start", m.unit])
+    else:
+        rc = _run_streaming([str(REPO / "models" / m.slug / "serve"), "start"])
+
+    if rc == 0 and health_ok(m.port):
+        print(f"  {GREEN}✓ {m.slug} is up{RESET}  (http://localhost:{m.port}/v1)")
+    else:
+        print(f"  {RED}✗ start returned {rc} / health not OK{RESET} — last log lines:")
+        _tail_logs(m)
+
+
+def do_stop(m: Model, states: dict) -> None:
+    if systemd_managed(m):
+        ans = input(f"  {YELLOW}{m.slug} is a fixed systemd service — stop it? [y/N] {RESET}")
+        if ans.strip().lower() not in ("y", "yes"):
+            print("  cancelled.")
+            return
+        rc = _run_streaming(["sudo", "systemctl", "stop", m.unit])
+    else:
+        rc = _run_streaming([str(REPO / "models" / m.slug / "serve"), "stop"])
+    print(f"  {GREEN}✓ stopped {m.slug}{RESET}" if rc == 0
+          else f"  {RED}✗ stop returned {rc}{RESET}")
+
+
+def _tail_logs(m: Model) -> None:
+    if systemd_managed(m):
+        r = subprocess.run(["journalctl", "-u", m.unit, "-n", "20", "--no-pager"],
+                           capture_output=True, text=True)
+    else:
+        r = docker("logs", "--tail", "20", m.container)
+    for line in (r.stdout + r.stderr).splitlines()[-20:]:
+        print(f"    {DIM}{line}{RESET}")
+
+
+def toggle(m: Model, models: list[Model], states: dict) -> None:
+    if state_of(m, states) in RUNNING_STATES:
+        do_stop(m, states)
+    else:
+        do_start(m, models, states)
+
+
+# --------------------------------------------------------------------------- #
+# render
+# --------------------------------------------------------------------------- #
+ICON = {
+    "healthy": f"{GREEN}●{RESET}",
+    "running": f"{GREEN}●{RESET}",
+    "starting": f"{YELLOW}◐{RESET}",
+    "unhealthy": f"{RED}●{RESET}",
+    "stopped": f"{DIM}○{RESET}",
+}
+
+
+def render(models: list[Model], states: dict) -> None:
+    print("\x1b[2J\x1b[H", end="")
+    print(f"  {BOLD}llmctl{RESET}  {DIM}—  DGX Spark (GB10), {POOL_GB} GB unified{RESET}\n")
+    print(f"   {DIM}#  model                        state       mem    port   role{RESET}")
+    for i, m in enumerate(models, 1):
+        st = state_of(m, states)
+        word = st + (" (systemd)" if systemd_managed(m) else "")
+        role = m.role
+        print(f"   {BOLD}{i}{RESET}  {m.slug:<27} {ICON[st]} {word:<18} "
+              f"{m.gmu:.2f}   {m.port}   {DIM}{role}{RESET}")
+
+    total = running_total(models, states)
+    filled = min(12, round(total / POOL_BUDGET * 12))
+    bar = f"{GREEN}{'▓' * filled}{RESET}{DIM}{'░' * (12 - filled)}{RESET}"
+    used_gb = round(total * POOL_GB)
+    budget_gb = round(POOL_BUDGET * POOL_GB)
+    warn = f"  {RED}over budget{RESET}" if total > POOL_BUDGET else ""
+    print(f"\n   pool  {bar}  {total:.2f} / {POOL_BUDGET:.2f}   "
+          f"({DIM}~{used_gb} / ~{budget_gb} GB usable{RESET}){warn}")
+    print(f"\n   {DIM}number → toggle · r → refresh · q or Ctrl-C → quit{RESET}")
+
+
+# --------------------------------------------------------------------------- #
+# main loop
+# --------------------------------------------------------------------------- #
+def main() -> None:
+    models = discover()
+    if not models:
+        sys.exit("no models found under models/*/model.env")
+    while True:
+        states = container_states()
+        render(models, states)
+        try:
+            choice = input(f"   {BOLD}>{RESET} ").strip().lower()
+        except EOFError:
+            print()
+            return
+        if choice in ("q", "quit", "exit"):
+            return
+        if choice in ("", "r", "refresh"):
+            continue
+        if choice.isdigit() and 1 <= int(choice) <= len(models):
+            print()
+            toggle(models[int(choice) - 1], models, states)
+            input(f"\n   {DIM}press Enter …{RESET}")
+        else:
+            print(f"   {DIM}?{RESET}")
+            time.sleep(0.7)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(f"\n{DIM}bye.{RESET}")

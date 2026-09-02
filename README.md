@@ -46,6 +46,7 @@ models/
     ├── model.env       identity + pooling knobs (no chat/generate flags)
     ├── notes.md         dense/sparse/ColBERT facts, --runner pooling, fallbacks
     └── serve            thin wrapper -> common/serve.sh with this dir
+llmctl                  interactive terminal dashboard: toggle models, memory-fit check
 .env                    box-wide secrets: API_KEY, HF_TOKEN
 .hf-venv/               venv for the bench harness + hf downloads
 ```
@@ -97,6 +98,25 @@ it runs) — a real per-model override needs a plain assignment instead, e.g.
 still `box.env`'s stock default, so a one-off env var still wins).
 
 ---
+
+## `llmctl` — interactive control
+
+```bash
+./llmctl
+```
+
+A one-screen terminal dashboard: every model, whether it's running, its pool
+reservation (`GPU_MEM_UTIL` from `model.env`) and port. Type a number to
+toggle it — running → stop, stopped → start. A start is refused up front if
+the running models' `GPU_MEM_UTIL` sum plus the candidate would exceed the
+pool budget (`POOL_BUDGET`, default `0.90` — host keeps ~0.10), telling you
+which model to stop first. Stopping a fixed systemd model (`qwen3.8-27b-fp8`,
+`bge-m3`) asks `y/N` first. `q` or Ctrl-C quits.
+
+It just wraps `models/<slug>/serve start|stop` (on-demand models) and
+`sudo systemctl start|stop llm-vllm@<slug>` (systemd models) — same as doing
+it by hand, minus the memory arithmetic. The one-line role shown per model
+comes from a `# llmctl: …` comment in each `model.env`.
 
 ## Serve a model
 

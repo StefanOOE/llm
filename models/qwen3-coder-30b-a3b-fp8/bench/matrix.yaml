@@ -1,0 +1,146 @@
+# Benchmark matrix for Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 on NVIDIA DGX Spark (GB10)
+#
+#   sg docker -c ".hf-venv/bin/python common/bench/run.py --model models/qwen3-coder-30b-a3b-fp8 --suite <name>"
+#
+# Image / caches / repo id / served name / port come from  common/box.env +
+# models/qwen3-coder-30b-a3b-fp8/model.env . This file is ONLY the sweep.
+#
+# GB10 + this model notes (see ../notes.md):
+#  - 128 GB *unified* LPDDR5x: --gpu-memory-utilization carves from the whole pool.
+#  - VLLM_USE_DEEP_GEMM=0 mandatory (asserts on sm_121); set in box.env + env below.
+#  - MoE (128 experts / 8 active) => --moe-backend IS a real axis. block-FP8
+#    checkpoint -> flashinfer_cutlass likely rejected (vLLM #43507, same as
+#    qwen3.8-27b); probe auto vs triton, correctness-gated (manual curl).
+#  - Context 262144 native, no YaRN.
+#  - No MTP -> no spec-decode axis. GQA 4-KV-head -> cheap KV.
+#  - Tool calling (qwen3_coder parser) is NOT checked by `vllm bench serve`
+#    (it only counts tokens) -- curl a `tools` request manually once.
+
+defaults:
+  models:
+    fp8: {path: Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8}
+  common_flags:
+    - --language-model-only
+    - --trust-remote-code
+    - --enable-auto-tool-choice
+    - --tool-call-parser=qwen3_coder
+  env:
+    VLLM_USE_DEEP_GEMM: "0"
+    LANG: C.UTF-8
+    LC_ALL: C.UTF-8
+    HF_HUB_OFFLINE: "1"
+  config_defaults:
+    model: fp8
+    gpu_memory_utilization: 0.40
+    max_model_len: 262144
+    max_num_seqs: 16
+    kv_cache_dtype: fp8
+    spec: null
+    prefix_caching: false
+    max_num_batched_tokens: null
+    extra_flags: []
+  workload_defaults:
+    input_len: 1024
+    output_len: 1024
+    num_prompts: 16
+    concurrency: 16
+    request_rate: inf
+    ignore_eos: true
+    warmups: 3
+    prefix_len: 0
+    random_range_ratio: 0.0
+  server_startup_timeout_s: 1200
+  teardown_pause_s: 12
+
+# ----------------------------------------------------------------------------
+workloads:
+  smoke_stream: {input_len: 256, output_len: 256, num_prompts: 3, concurrency: 1, warmups: 1}
+  smoke_batch:  {input_len: 512, output_len: 256, num_prompts: 8, concurrency: 8, warmups: 1}
+
+  single_stream:   {input_len: 512,  output_len: 1024, num_prompts: 3,  concurrency: 1}
+  batch4_balanced: {input_len: 1024, output_len: 1024, num_prompts: 12, concurrency: 4}
+  batch8_balanced: {input_len: 1024, output_len: 1024, num_prompts: 16, concurrency: 8}
+  codegen_decode:  {input_len: 1024, output_len: 4096, num_prompts: 8,  concurrency: 8}
+  saturate16:      {input_len: 1024, output_len: 1024, num_prompts: 32, concurrency: 16}
+  saturate32:      {input_len: 1024, output_len: 1024, num_prompts: 64, concurrency: 32}
+
+  agent_turn_solo:     {prefix_len: 8000, input_len: 400, output_len: 600,
+                        num_prompts: 20, concurrency: 1, random_range_ratio: 0.3}
+  agent_turn_parallel: {prefix_len: 8000, input_len: 400, output_len: 600,
+                        num_prompts: 40, concurrency: 8, random_range_ratio: 0.3}
+
+  ctx8k_load:   {input_len: 3600,   output_len: 800,  num_prompts: 12, concurrency: 8}
+  ctx32k_load:  {input_len: 14000,  output_len: 3000, num_prompts: 6,  concurrency: 4}
+  ctx65k_load:  {input_len: 28000,  output_len: 4000, num_prompts: 4,  concurrency: 3}
+  ctx131k_load: {input_len: 56000,  output_len: 8000, num_prompts: 2,  concurrency: 2}
+  ctx262k_load: {input_len: 115000, output_len: 8000, num_prompts: 1,  concurrency: 1}
+
+# ----------------------------------------------------------------------------
+configs:
+  # --- MoE backend probe (correctness-gated: curl every config) ---
+  backend_auto:   {extra_flags: []}
+  backend_triton: {extra_flags: [--moe-backend, triton]}
+
+  # --- KV cache dtype ---
+  kv_auto: {kv_cache_dtype: auto}
+  kv_fp8:  {kv_cache_dtype: fp8}
+
+  # --- max-num-seqs ---
+  seqs_1:  {max_num_seqs: 1}
+  seqs_4:  {max_num_seqs: 4}
+  seqs_8:  {max_num_seqs: 8}
+  seqs_16: {max_num_seqs: 16}
+  seqs_32: {max_num_seqs: 32}
+
+  # --- prefix caching A/B ---
+  prefix_off: {prefix_caching: false}
+  prefix_on:  {prefix_caching: true}
+
+  # --- context scaling (gmu scaled up as context grows) ---
+  ctx_8k:   {max_model_len: 8192,   max_num_seqs: 16, gpu_memory_utilization: 0.40}
+  ctx_32k:  {max_model_len: 32768,  max_num_seqs: 12, gpu_memory_utilization: 0.40}
+  ctx_65k:  {max_model_len: 65536,  max_num_seqs: 8,  gpu_memory_utilization: 0.45}
+  ctx_131k: {max_model_len: 131072, max_num_seqs: 4,  gpu_memory_utilization: 0.50}
+  ctx_262k: {max_model_len: 262144, max_num_seqs: 2,  gpu_memory_utilization: 0.55}
+
+  # --- prefill throughput on long code prompts ---
+  batched_4096: {max_num_batched_tokens: 4096}
+  batched_8192: {max_num_batched_tokens: 8192}
+
+# ----------------------------------------------------------------------------
+suites:
+  smoke:
+    - [backend_auto, [smoke_stream, smoke_batch]]
+
+  moe_backend_probe:
+    - [backend_auto,   [single_stream, batch8_balanced]]
+    - [backend_triton, [single_stream, batch8_balanced]]
+
+  kv_sweep:
+    - [kv_auto, [single_stream, batch8_balanced, codegen_decode]]
+    - [kv_fp8,  [single_stream, batch8_balanced, codegen_decode]]
+
+  seqs_sweep:
+    - [seqs_1,  [single_stream, batch4_balanced]]
+    - [seqs_4,  [single_stream, batch4_balanced, saturate16]]
+    - [seqs_8,  [single_stream, batch8_balanced, saturate16]]
+    - [seqs_16, [single_stream, batch8_balanced, saturate32]]
+    - [seqs_32, [single_stream, batch8_balanced, saturate32]]
+
+  prefix_cache_ab:
+    - [prefix_off, [agent_turn_solo, agent_turn_parallel]]
+    - [prefix_on,  [agent_turn_solo, agent_turn_parallel]]
+
+  context_scaling:
+    - [ctx_8k,   [ctx8k_load]]
+    - [ctx_32k,  [ctx32k_load]]
+    - [ctx_65k,  [ctx65k_load]]
+    - [ctx_131k, [ctx131k_load]]
+    - [ctx_262k, [ctx262k_load]]
+
+  batched_tokens_sweep:
+    - [batched_4096, [codegen_decode]]
+    - [batched_8192, [codegen_decode]]
+
+  overnight:
+    include: [moe_backend_probe, kv_sweep, seqs_sweep, prefix_cache_ab, context_scaling, batched_tokens_sweep]

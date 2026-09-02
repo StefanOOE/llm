@@ -85,18 +85,22 @@ workloads:
 
 # ----------------------------------------------------------------------------
 configs:
-  # --- MoE backend probe (correctness-gated: curl a chat completion against
-  #     EVERY config, confirm non-null content, before trusting throughput).
-  #     deep_gemm excluded (box-wide VLLM_USE_DEEP_GEMM=0). ---
+  # --- MoE backend (SWEPT 2026-09-02): auto == triton (~69 single / ~170
+  #     batch8, identical). cutlass -> "vLLM CUTLASS FP8 MoE backend is
+  #     disabled for this configuration". deep_gemm box-blocked. auto wins,
+  #     kept only for a re-check. ---
   backend_auto:    {extra_flags: []}
   backend_triton:  {extra_flags: [--moe-backend, triton]}
-  backend_cutlass: {extra_flags: [--moe-backend, cutlass]}
 
-  # --- MLA KV dtype (fp8_ds_mla excluded -- no backend supports it here) ---
+  # --- KV dtype (SWEPT 2026-09-02): auto is the ONLY working option.
+  #     fp8 -> triton MLA kernel needs 102400 B shared mem > SM121's 101376.
+  #     fp8_ds_mla -> no MLA attention backend supports it here. kv_fp8 kept
+  #     to detect a future image fixing the shared-mem limit. ---
   kv_auto: {kv_cache_dtype: auto}
   kv_fp8:  {kv_cache_dtype: fp8}
 
-  # --- max-num-seqs (MoE: watch for regression past the sweet spot) ---
+  # --- max-num-seqs (SWEPT 2026-09-02): sweet spot 8 (codegen 68->97->128->
+  #     166->167 tok/s at 1/2/4/8/16; no regression past 8). ---
   seqs_1:  {max_num_seqs: 1}
   seqs_2:  {max_num_seqs: 2}
   seqs_4:  {max_num_seqs: 4}
@@ -121,11 +125,10 @@ suites:
   moe_backend_probe:
     - [backend_auto,    [single_stream, batch8_balanced]]
     - [backend_triton,  [single_stream, batch8_balanced]]
-    - [backend_cutlass, [single_stream, batch8_balanced]]
 
   mla_kv_check:
     - [kv_auto, [single_stream, batch8_balanced, codegen_decode, ctx65k_load]]
-    - [kv_fp8,  [single_stream, batch8_balanced, codegen_decode, ctx65k_load]]
+    - [kv_fp8,  [single_stream, batch8_balanced, codegen_decode, ctx65k_load]]   # expected to fail on this image
 
   seqs_sweep:
     - [seqs_1,  [single_stream, batch4_balanced, codegen_decode]]

@@ -1,18 +1,32 @@
 # RedHatAI/DeepSeek-Coder-V2-Lite-Instruct-FP8 — notes
 
-**Status (2026-09-01): scaffolded + smoke-tested, NOT yet benchmark-tuned.**
-Weights downloaded, serves cleanly (health OK, coherent chat, clean
-detokenization after the tokenizer fix below, 48k-token prompt handled in
-~13 s). Every numeric knob in `model.env` is a reasoned starting point, not a
-sweep result — run `bench/matrix.yaml`'s `overnight` suite and fold the
-winners in. Three start-blocking issues were found and fixed during the smoke
-test — see below (trust-remote-code, `fp8_ds_mla`, tokenizer).
+**Status (2026-09-02): benchmark-tuned.** Serves cleanly (clean detokenization
+after the tokenizer fix below). The `overnight` sweep (31 runs,
+`bench/results/overnight_20260902_050212/`) confirmed every `model.env`
+default — no value changed, because the starting points were right (or
+forced by what works on this box). Three start-blocking issues were found +
+fixed during the smoke test (trust-remote-code, `fp8_ds_mla`, tokenizer).
+
+## Sweep results (2026-09-02)
+
+Single-stream **~69 tok/s** (fast — the "performance" model earns the name;
+qwen3.8-27b ≈ 28, gpt-oss-120b ≈ 12). tpot ~14.4 ms. All at `GPU_MEM_UTIL
+0.30` (peak unified-mem use ~44 GiB, ~52 GiB at ctx 131k).
+
+| axis | result | model.env |
+|---|---|---|
+| MoE backend | `auto` == `triton` (69 / 172 tok/s single/batch8, identical). `cutlass` disabled for this config, `deep_gemm` box-blocked. | `EXTRA_VLLM_ARGS` = tokenizer only (auto) |
+| KV dtype | `auto` is the **only** working option (see below) | `KV_CACHE_DTYPE=auto` |
+| `max_num_seqs` | sweet spot **8** — codegen_decode 68→97→128→**166**→167 tok/s at 1/2/4/8/16, no regression past 8 (unlike gpt-oss) | `MAX_NUM_SEQS=8` |
+| prefix caching | big win — `agent_turn_solo` TTFT 1108→126 ms (−89%), `agent_turn_parallel` 2070→277 ms (−87%), throughput +11/+34% | `PREFIX_CACHING=1` |
+| context scaling | 8k→154, 32k→99, 65k→74, 131k→47 tok/s; TTFT 1.5/5.9/10.7/20.7 s. MLA keeps 131k usable. | `MAX_MODEL_LEN=131072` |
+| GPU_MEM_UTIL | 0.30 peaks ~44–52 GiB → does **not** fit alongside a live qwen3.8 (0.65 ≈ 83 GiB) + bge (15 GiB) = ~148 GiB > 128. On-demand only. | `GPU_MEM_UTIL=0.30` |
 
 Role on this box: the **performance** coding model (the **quality** one is
-`qwen2.5-coder-32b-fp8`). On-demand only — **not** a systemd service. Small
-enough (~16 GiB weights + cheap MLA KV) that it *may* fit alongside a live
-`qwen3.8-27b-fp8` + `bge-m3` — the sweep's memory numbers decide; document the
-verdict here afterwards.
+`qwen3-coder-30b-a3b-fp8`). On-demand only — **not** a systemd service, and
+it does **not** co-reside with a live `qwen3.8-27b-fp8` (0.30 peaks
+~44–52 GiB unified; qwen3.8 + bge already use ~98). Stop qwen3.8 first, same
+as the other on-demand models.
 
 ## What it is
 
@@ -65,20 +79,23 @@ verdict here afterwards.
   respects the embedded ByteLevel decoder) + the original `tokenizer.json`;
   `model.env` stages it into the mounted HF cache on first start. `decode()`
   then returns `"Hello world\n  def foo():"` and vLLM output is clean.
-- **MLA KV dtype: `auto` (bf16).** `fp8_ds_mla` (the DeepSeek MLA-specific FP8
-  KV in the `--kv-cache-dtype` enum) **fails on this box** — verified
-  2026-09-01: `ValueError: No valid attention backend found for cuda ...
-  kv_cache_dtype=fp8_ds_mla, use_mla=True. Reasons: {TRITON_MLA:
-  [kv_cache_dtype not supported], FLASHINFER_MLA_SPARSE_SM120: [requires
-  index_topk config]}`. `TRITON_MLA` is the only working MLA attention
-  backend in this NGC image on SM121, and it wants bf16 KV. MLA's KV latent
-  is ~576 elems/token anyway, so fp8 KV would save little. `mla_kv_check`
-  still A/Bs `auto` vs plain `fp8`.
-- **`--moe-backend`** is a real axis (MoE model). `moe_backend_probe` tries
-  `auto` / `triton` / `cutlass`. Unlike gpt-oss's MXFP4 checkpoint (which
-  the flashinfer CUTLASS kernel rejected for its scale-group layout), this is
-  a plain FP8 block-quant MoE — `cutlass` may actually work here. **Correctness
-  must be curl-verified per backend** (`vllm bench serve` only counts tokens).
+- **MLA KV dtype: `auto` (bf16) — the only option on this box.** Both FP8
+  KV paths fail:
+  - `fp8_ds_mla`: `ValueError: No valid attention backend found for cuda ...
+    use_mla=True. Reasons: {TRITON_MLA: [kv_cache_dtype not supported],
+    FLASHINFER_MLA_SPARSE_SM120: [requires index_topk config]}` (2026-09-01).
+  - `fp8`: `triton.runtime.errors.OutOfResources: out of resource: shared
+    memory, Required: 102400, Hardware limit: 101376` — the Triton MLA fp8
+    kernel wants 100 KB shared mem, SM121 has 99 KB (2026-09-02 sweep).
+  `TRITON_MLA` is the only MLA attention backend here and it needs bf16 KV.
+  MLA's KV latent is tiny (~576 elems/token) so fp8 KV would save little
+  anyway. `mla_kv_check` keeps `kv_fp8` only to catch a future image that
+  lifts the shared-mem limit.
+- **`--moe-backend auto`** (picks `FLASHINFER_CUTLASS`). Swept 2026-09-02:
+  `auto` == forced `triton` (68.6/171.7 vs 68.9/168.2 tok/s single/batch8 —
+  run-to-run noise). Forced `--moe-backend cutlass` -> `ValueError: vLLM
+  CUTLASS FP8 MoE backend is disabled for this configuration`. `deep_gemm`
+  box-blocked. `EXTRA_VLLM_ARGS` stays tokenizer-only.
 - **Tool calling — NOT SUPPORTED, confirmed from the checkpoint.** Its
   `chat_template` (tokenizer_config.json) renders only user/assistant/system
   turns as plain `User: … Assistant: …` — no `tools` block, no tool_calls
@@ -89,20 +106,16 @@ verdict here afterwards.
   scope — this is the "fast code completion / chat" model).
 - **Reasoning:** not a thinking model — `REASONING_PARSER` empty.
 
-## Open questions for the sweep / first start
+## Resolved
 
-1. **RESOLVED: HF_HUB_OFFLINE / auto_map** — `TRUST_REMOTE_CODE=0`, see above.
-2. **RESOLVED: `fp8_ds_mla` KV fails on SM121** — default `auto`, see above.
-3. **RESOLVED: broken tokenizer (dropped spaces)** — corrected `./tokenizer/`, see above.
-4. **MoE backend** — `auto` (picks FLASHINFER_CUTLASS) vs `triton` vs
-   `cutlass`, correctness-gated.
-5. **`max_num_seqs`** — MoE models often regress past the sweet spot
-   (gpt-oss did). `seqs_sweep` 1/2/4/8/16.
-6. **Prefix caching** win on coding-shaped traffic.
-7. **Co-residency** — does `GPU_MEM_UTIL 0.30` + live qwen3.8 (0.65) + bge-m3
-   (0.12) + host fit? First start showed ~19.3 GiB KV pool / 665k tokens /
-   5.07x @ 131k at 0.30 solo. Read `mem_ready_mb` / `server_kv_cache_gib`
-   from the sweep and record the answer here.
+1. **HF_HUB_OFFLINE / auto_map** — `TRUST_REMOTE_CODE=0`.
+2. **`fp8_ds_mla` + `fp8` KV both fail on SM121** — default `auto`.
+3. **Broken tokenizer (dropped spaces)** — corrected `./tokenizer/`.
+4. **MoE backend** — `auto` == `triton`; `cutlass` disabled. Kept `auto`.
+5. **`max_num_seqs`** — sweet spot 8, no regression past it.
+6. **Prefix caching** — big win, kept on.
+7. **Co-residency** — no, does not fit alongside qwen3.8. On-demand only.
+8. **Tool calling** — not supported by the checkpoint's chat template.
 
 ## Sources
 

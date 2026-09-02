@@ -79,16 +79,19 @@ workloads:
   ctx262k_load: {input_len: 115000, output_len: 8000, num_prompts: 1,  concurrency: 1}
 
 # ----------------------------------------------------------------------------
+# SWEPT 2026-09-02 (overnight, 35 runs). Winners folded into model.env:
+#   backend auto(=triton) · kv fp8 · seqs 16 · prefix on · ctx 131072 · gmu 0.50
+# ----------------------------------------------------------------------------
 configs:
-  # --- MoE backend probe (correctness-gated: curl every config) ---
+  # --- MoE backend: auto (TRITON) == forced triton, within noise ---
   backend_auto:   {extra_flags: []}
   backend_triton: {extra_flags: [--moe-backend, triton]}
 
-  # --- KV cache dtype ---
+  # --- KV cache dtype: fp8 wins on batched work ---
   kv_auto: {kv_cache_dtype: auto}
   kv_fp8:  {kv_cache_dtype: fp8}
 
-  # --- max-num-seqs ---
+  # --- max-num-seqs: no regression 1->32; 16 chosen for the deployment shape ---
   seqs_1:  {max_num_seqs: 1}
   seqs_4:  {max_num_seqs: 4}
   seqs_8:  {max_num_seqs: 8}

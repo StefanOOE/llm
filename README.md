@@ -31,9 +31,9 @@ models/
 │   └── bench/
 │       ├── matrix.yaml   the sweep (configs, workloads, suites)
 │       └── results/      per-run JSON, server logs, summary.csv (4 suites: backend/seqs/kv/context)
-├── qwen3-coder-30b-a3b-fp8/  MoE block-FP8 coder, 262144 ctx   (quality coder; scaffolded, sweep pending)
-│   ├── model.env           identity + starting-point knobs; qwen3_coder tool parser
-│   ├── notes.md            why not Qwen2.5-Coder-32B (bandwidth wall), MoE facts, open questions
+├── qwen3-coder-30b-a3b-fp8/  MoE block-FP8 coder, 131072 ctx   (quality coder; benchmark-tuned)
+│   ├── model.env           benchmark-tuned knobs; qwen3_coder tool parser
+│   ├── notes.md            why not Qwen2.5-Coder-32B (bandwidth wall), MoE facts, sweep results
 │   ├── serve               thin wrapper -> common/serve.sh with this dir
 │   └── bench/matrix.yaml    moe_backend / kv / seqs / prefix / context suites
 ├── deepseek-coder-v2-lite-fp8/  MoE+MLA FP8 coder, 131072 ctx   (performance coder; benchmark-tuned)
@@ -60,16 +60,15 @@ Weights and the vLLM compile cache live outside the repo:
 | `qwen3.8-27b-fp8` | `qwen3.8-27b-uncensored` | 8000 | `/v1/chat/completions` | 131072 | Apache 2.0, uncensored | benchmark-tuned, in daily use (systemd) |
 | `bge-m3` | `bge-m3` | 8001 | `/v1/embeddings` | 8192 | MIT | in use, embeddings for the litellm proxy (systemd) |
 | `gpt-oss-120b` | `gpt-oss-120b` | 8002 | `/v1/chat/completions` | 65536 | Apache 2.0, stock safety | benchmark-tuned, on-demand |
-| `qwen3-coder-30b-a3b-fp8` | `qwen3-coder-30b` | 8003 | `/v1/chat/completions` | 262144 | Apache 2.0 | quality coder — scaffolded, sweep pending, on-demand |
+| `qwen3-coder-30b-a3b-fp8` | `qwen3-coder-30b` | 8003 | `/v1/chat/completions` | 131072 | Apache 2.0 | quality coder — benchmark-tuned, on-demand |
 | `deepseek-coder-v2-lite-fp8` | `deepseek-coder-v2-lite` | 8004 | `/v1/chat/completions` | 131072 | DeepSeek license | performance coder — benchmark-tuned, on-demand |
 
 All share the 128 GB unified pool — see **Running multiple models** below.
 **Fixed (systemd, boot-persistent):** `qwen3.8-27b-fp8` (`0.65`) + `bge-m3`
 (`0.12`). **On-demand** (`./serve start` / `stop`, no service): `gpt-oss-120b`,
 `qwen3-coder-30b-a3b-fp8`, `deepseek-coder-v2-lite-fp8` — each needs
-`qwen3.8-27b-fp8` stopped first for memory (the possible exception is
-`deepseek-coder-v2-lite-fp8` at `0.30` — small enough that it *may* co-reside;
-the pending sweep's memory numbers decide).
+`qwen3.8-27b-fp8` stopped first for memory (confirmed by each model's sweep,
+`deepseek-coder-v2-lite` included).
 
 ## Config layers
 

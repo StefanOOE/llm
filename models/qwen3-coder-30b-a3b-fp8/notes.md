@@ -1,21 +1,28 @@
 # Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 — notes
 
-**Status (2026-09-02): scaffolded + smoke-tested, NOT yet benchmark-tuned.**
-Smoke test (qwen3.8 stopped):
-- serves, `/v1/models` ctx 262144, clean code output.
-- **Decode ~57 tok/s** sustained (600 tok in 10.5 s) — **8.5x** the
-  Qwen2.5-Coder-32B dense it replaces (~6.7 tok/s). This is the point.
-- **Tool calling `tool_choice: "auto"` works 3/3** (clean `tool_calls`,
-  name + args) with the `qwen3_coder` parser — Qwen2.5-Coder-32B failed 3/3.
-- Long context: a 105,804-token prompt answered correctly, 66 s TTFT.
-- Startup: weights 29.1 GiB / 189 s. `auto` picked **TRITON** Fp8 MoE +
-  **FLASHINFER** attention.
-- **KV pool thin at deep context:** at `GPU_MEM_UTIL 0.40`, 16.56 GiB /
-  361,712 tokens / **1.38x concurrency @ 262144**. Bumped default to 0.50;
-  the `context_scaling` sweep settles GMU vs the 262144-vs-131072 default.
+**Status (2026-09-02): benchmark-tuned.** Smoke test + `overnight` sweep
+(35 runs, `bench/results/overnight_20260902_153547/`).
 
-`model.env` numeric knobs are still starting points — run `bench/matrix.yaml`'s
-`overnight` suite and fold winners in.
+Smoke test: serves, clean code output, **tool calling `tool_choice: "auto"`
+works 3/3** (clean `tool_calls` with the `qwen3_coder` parser — Qwen2.5-Coder-32B
+failed 3/3), a 105,804-token prompt answered correctly. Startup: weights
+29.1 GiB / 189 s, `auto` picks **TRITON** Fp8 MoE + **FLASHINFER** attention.
+
+## Sweep results (2026-09-02)
+
+**~56 tok/s single-stream** flat across every config — **8.5x** the
+Qwen2.5-Coder-32B dense this replaces (~6.7 tok/s, memory-bandwidth wall).
+Peak observed 302 tok/s (`seqs_32` / 32 concurrent).
+
+| axis | result | model.env |
+|---|---|---|
+| MoE backend | `auto` (TRITON) == forced `triton` (56/152 vs 56/155 single/batch8) | `EXTRA_VLLM_ARGS` empty |
+| KV dtype | `fp8` > `auto` on batched work (batch8 155 vs 140, codegen 135 vs 124; single a wash) | `KV_CACHE_DTYPE=fp8` |
+| `max_num_seqs` | no regression 1→32. Flat single/batch8 from 8 up. Only a 32-way burst rewards more (seqs_32 302 tok/s / TTFT 1.7 s vs seqs_16 214 / 76 s). Few-user on-demand → 16. | `MAX_NUM_SEQS=16` |
+| prefix caching | agent-shaped: TTFT −87/−88 %, throughput +11/+46 % | `PREFIX_CACHING=1` |
+| context | 8k→117, 32k→69, 65k→45, **131k→37**, 262k→19 tok/s; TTFT 2 / 5.5 / 13 / 33 / 80 s. Full attention → deep context costly. | `MAX_MODEL_LEN=131072` (262144 via one-off env) |
+| `--max-num-batched-tokens` | 4096 / 8192 / default all ~132–135 tok/s on codegen — no effect | not set |
+| GPU_MEM_UTIL | 0.50 @ 131072: 29.3 GiB KV / 640,672 tokens / 4.89x conc, mem peak ~72 GB | `GPU_MEM_UTIL=0.50` |
 
 Role on this box: the **quality** coding model (the **performance** one is
 `deepseek-coder-v2-lite-fp8`). On-demand only — **not** a systemd service;
@@ -61,29 +68,21 @@ most coding evals. This is the same MoE trade the box already makes for
 - **Do NOT pass `--quantization`** — read from `quantization_config`.
 - **Tool calling:** dedicated parser `qwen3_coder` (in this image's
   `--tool-call-parser` enum). The repo ships `chat_template.jinja` +
-  `qwen3coder_tool_parser.py`; vLLM also bundles
-  `/opt/vllm/vllm-src/examples/tool_chat_template_qwen3coder.jinja`.
-  **VERIFY at first start** that `tool_choice: "auto"` returns non-null
-  `tool_calls` — Qwen2.5-Coder-32B failed this (emitted the wrong wrapper);
-  Qwen3-Coder is the model `qwen3_coder` was built for, so it should work.
+  `qwen3coder_tool_parser.py`; the checkpoint's embedded chat template
+  (tokenizer_class `Qwen2Tokenizer`) is used directly, no `--chat-template`
+  override. `tool_choice: "auto"` verified 3/3.
 - **Tool calling needs xgrammar ≥ 0.2.4** — same NGC bug/fix as qwen3.8;
   `model.env` reuses the `vllm-qwen:26.07-xgrammar024` image.
-- **`--moe-backend`:** `flashinfer_cutlass` was rejected for `qwen3.8-27b`'s
-  block-FP8 MoE on SM120/121 (vLLM #43507) — expect the same here. Probe
-  `auto` vs `triton`, correctness-gated.
+- **`--moe-backend`:** `auto` picks TRITON (not cutlass). Forcing `triton`
+  is identical within noise. `EXTRA_VLLM_ARGS` stays empty.
 
-## Open questions for the sweep
+## Resolved by the sweep
 
-1. **RESOLVED: tool calling `tool_choice: "auto"`** — works 3/3, no override.
-2. **RESOLVED: decode speed** — ~57 tok/s, clears the 32B-dense bar 8.5x.
-3. **RESOLVED: MoE backend** — `auto` picks TRITON; `moe_backend_probe`
-   re-checks vs forced.
-4. **Context default** — keep 262144 (needs GMU ~0.5 for headroom) or drop
-   to 131072? `context_scaling` decides.
-5. **KV dtype** — `fp8` vs `auto` (`kv_sweep`).
-6. **`max_num_seqs`** sweet spot (`seqs_sweep`) — MoE regression watch.
-7. **Prefix caching** win size on coding traffic.
-8. **`GPU_MEM_UTIL`** — 0.50 placeholder; derive from the sweep.
+Tool calling (`auto` 3/3), decode speed (~56 tok/s, 8.5x the 32B dense),
+MoE backend (auto=TRITON), KV dtype (fp8), `max_num_seqs` (16, no
+regression), prefix caching (big win), context default (131072 — 262144
+is 2x slower + huge TTFT), `--max-num-batched-tokens` (no effect),
+`GPU_MEM_UTIL` (0.50). Full numbers in the table above.
 
 ## Sources
 

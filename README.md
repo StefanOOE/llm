@@ -31,6 +31,16 @@ models/
 │   └── bench/
 │       ├── matrix.yaml   the sweep (configs, workloads, suites)
 │       └── results/      per-run JSON, server logs, summary.csv (4 suites: backend/seqs/kv/context)
+├── qwen2.5-coder-32b-fp8/  dense FP8 W8A8 coder, YaRN->131072   (quality coder; scaffolded, sweep pending)
+│   ├── model.env           identity + starting-point knobs; YaRN via EXTRA_VLLM_ARGS --hf-overrides
+│   ├── notes.md            model-card facts + open questions for the sweep
+│   ├── serve               thin wrapper -> common/serve.sh with this dir
+│   └── bench/matrix.yaml    kv / seqs / yarn_cost / prefix / context / 256k-probe suites
+├── deepseek-coder-v2-lite-fp8/  MoE+MLA FP8 coder, 131072 ctx   (performance coder; scaffolded, sweep pending)
+│   ├── model.env           identity + starting-point knobs; kv_cache_dtype fp8_ds_mla
+│   ├── notes.md            MoE/MLA facts, tool-parser + HF_HUB_OFFLINE open questions
+│   ├── serve               thin wrapper -> common/serve.sh with this dir
+│   └── bench/matrix.yaml    moe_backend / mla_kv / seqs / prefix / context suites
 └── bge-m3/            XLM-RoBERTa encoder, 1024-dim multilingual embeddings   (RUNNER=pooling)
     ├── model.env       identity + pooling knobs (no chat/generate flags)
     ├── notes.md         dense/sparse/ColBERT facts, --runner pooling, fallbacks
@@ -46,13 +56,19 @@ Weights and the vLLM compile cache live outside the repo:
 
 | slug | served as | port | endpoint | context | license | status |
 |---|---|---|---|---|---|---|
-| `qwen3.8-27b-fp8` | `qwen3.8-27b-uncensored` | 8000 | `/v1/chat/completions` | 131072 | Apache 2.0, uncensored | benchmark-tuned, in daily use |
-| `gpt-oss-120b` | `gpt-oss-120b` | 8002 | `/v1/chat/completions` | 65536 | Apache 2.0, stock safety | benchmark-tuned |
-| `bge-m3` | `bge-m3` | 8001 | `/v1/embeddings` | 8192 | MIT | in use (embeddings for the litellm proxy) |
+| `qwen3.8-27b-fp8` | `qwen3.8-27b-uncensored` | 8000 | `/v1/chat/completions` | 131072 | Apache 2.0, uncensored | benchmark-tuned, in daily use (systemd) |
+| `bge-m3` | `bge-m3` | 8001 | `/v1/embeddings` | 8192 | MIT | in use, embeddings for the litellm proxy (systemd) |
+| `gpt-oss-120b` | `gpt-oss-120b` | 8002 | `/v1/chat/completions` | 65536 | Apache 2.0, stock safety | benchmark-tuned, on-demand |
+| `qwen2.5-coder-32b-fp8` | `qwen2.5-coder-32b` | 8003 | `/v1/chat/completions` | 131072 (YaRN) | Apache 2.0 | quality coder — scaffolded, sweep pending, on-demand |
+| `deepseek-coder-v2-lite-fp8` | `deepseek-coder-v2-lite` | 8004 | `/v1/chat/completions` | 131072 | DeepSeek license | performance coder — scaffolded, sweep pending, on-demand |
 
-All three share the 128 GB unified pool — see **Running multiple models**
-below. `qwen3.8-27b-fp8` (`0.65`) + `bge-m3` (`0.12`) run together today;
-`gpt-oss-120b` (`0.85`) does not fit alongside either yet.
+All share the 128 GB unified pool — see **Running multiple models** below.
+**Fixed (systemd, boot-persistent):** `qwen3.8-27b-fp8` (`0.65`) + `bge-m3`
+(`0.12`). **On-demand** (`./serve start` / `stop`, no service): `gpt-oss-120b`,
+`qwen2.5-coder-32b-fp8`, `deepseek-coder-v2-lite-fp8` — each needs
+`qwen3.8-27b-fp8` stopped first for memory (the possible exception is
+`deepseek-coder-v2-lite-fp8` at `0.30` — small enough that it *may* co-reside;
+the pending sweep's memory numbers decide).
 
 ## Config layers
 
@@ -85,7 +101,7 @@ still `box.env`'s stock default, so a one-off env var still wins).
 ## Serve a model
 
 ```bash
-cd models/<slug>        # qwen3.8-27b-fp8  |  gpt-oss-120b  |  bge-m3
+cd models/<slug>        # qwen3.8-27b-fp8 | bge-m3 | gpt-oss-120b | qwen2.5-coder-32b-fp8 | deepseek-coder-v2-lite-fp8
 
 ./serve                 # start: detached, wait for /health, print the API URL
 ./serve status          # systemd state + container health + API URLs + model list
@@ -109,12 +125,16 @@ HF_HOME=/home/ss/models/hf-cache \
 
 # bge-m3 (public, no token)
 HF_HOME=/home/ss/models/hf-cache .hf-venv/bin/hf download BAAI/bge-m3
+
+# qwen2.5-coder-32b-fp8  /  deepseek-coder-v2-lite-fp8 (both public, no token)
+HF_HOME=/home/ss/models/hf-cache .hf-venv/bin/hf download RedHatAI/Qwen2.5-Coder-32B-Instruct-FP8-dynamic
+HF_HOME=/home/ss/models/hf-cache .hf-venv/bin/hf download RedHatAI/DeepSeek-Coder-V2-Lite-Instruct-FP8
 ```
 
 First start is slow (weight load + torch.compile + CUDA-graph, + vision
-encoder for qwen, + ~63 GiB cold load for gpt-oss-120b — `STARTUP_TIMEOUT` in
-each `model.env` is sized for this); later starts are faster (compile cache
-persists). It prints:
+encoder for qwen, + ~63 GiB cold load for gpt-oss-120b, + ~34 GiB for
+qwen2.5-coder-32b — `STARTUP_TIMEOUT` in each `model.env` is sized for this);
+later starts are faster (compile cache persists). It prints:
 
 ```
   base URL (local)  : http://localhost:<port>/v1
@@ -162,8 +182,9 @@ sudo systemctl restart llm-vllm@<slug>   # returns once serving again
 ```
 
 Currently installed: `llm-vllm@qwen3.8-27b-fp8` and `llm-vllm@bge-m3` (both
-enabled, boot automatically). `gpt-oss-120b` is not installed as a service yet
-— still being benchmarked, started ad-hoc via `./serve start` / `./serve stop`.
+enabled, boot automatically). `gpt-oss-120b`, `qwen2.5-coder-32b-fp8` and
+`deepseek-coder-v2-lite-fp8` are **on-demand by design** — not installed as
+services, started ad-hoc via `./serve start` / `./serve stop`.
 
 One template unit, one instance per model slug. systemd is the single
 supervisor — in this mode `serve.sh ... run` execs `docker run --rm` in the
@@ -185,14 +206,24 @@ headroom must stay under 1.0.** e.g. two models at `0.40` each + `~0.15` host.
 Container names are `vllm-<slug>`, benchmark containers `bench-<slug>`, so they
 never collide.
 
-**Today's running pair:** qwen (`0.65`) + bge-m3 (`0.12`) = `0.77`, ~0.23 of
-the pool left for the host — fits, and both are systemd-enabled.
-**`gpt-oss-120b` (`0.85`) does not fit alongside either** (qwen+gpt = 1.5).
-Stop qwen before starting gpt-oss ad-hoc. Its sweep now shows real usage at
-0.85 (~66 GiB weights + ~34-35 GiB KV, ~101 GB of the ~109 GB carved) — not
-much slack to lower it without giving up KV headroom; a smaller cut than
-qwen's would be needed on both sides to run all three at once. bge-m3 is
-small enough to leave running either way.
+**Fixed pair (systemd):** qwen (`0.65`) + bge-m3 (`0.12`) = `0.77`, ~0.23 of
+the pool left for the host — fits, both boot-persistent.
+
+**On-demand models — stop qwen first:**
+- **`gpt-oss-120b` (`0.85`)** does not fit alongside qwen (qwen+gpt = 1.5).
+  Sweep shows real usage at 0.85 (~66 GiB weights + ~34-35 GiB KV, ~101 GB of
+  the ~109 GB carved).
+- **`qwen2.5-coder-32b-fp8` (`0.62` placeholder)** — ~34 GiB weights + a
+  ~16 GiB full-length KV sequence (full attention, unlike qwen3.8). Does not
+  fit alongside qwen; final `GPU_MEM_UTIL` comes from its sweep.
+- **`deepseek-coder-v2-lite-fp8` (`0.30` placeholder)** — only ~16 GiB weights
+  + cheap MLA KV. The one model that *might* co-reside with the fixed pair
+  (`0.30 + 0.77` + host); the sweep's `mem_ready_mb` / `server_kv_cache_gib`
+  decide — see its `notes.md`.
+
+bge-m3 is small enough to leave running in every case. Ports are distinct per
+model (8000/8001/8002/8003/8004); container names are `vllm-<slug>`, benchmark
+containers `bench-<slug>`, so nothing collides.
 
 ## Benchmarking
 

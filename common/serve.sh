@@ -43,7 +43,14 @@ source "$MODEL_DIR/model.env"
 set +a
 
 # -- box-wide secrets from LLM_ROOT/.env (model.env may already set API_KEY) - #
-_env_get() { [ -f "$LLM_ROOT/.env" ] && sed -n "s/^$1=//p" "$LLM_ROOT/.env" | tail -1 | sed 's/^["'\'']//;s/["'\'']$//'; }
+# NOTE: the trailing `; true` matters -- a bare assignment's exit status is
+# that of the last command substitution it ran (bash gotcha), so under
+# `set -e`, a missing .env (the "[ -f ]" test failing, short-circuiting the
+# `&&`) would silently kill this whole script right here instead of reaching
+# preflight()'s proper "API_KEY not set" error below. Observed 2026-09-03:
+# .env went missing (cause unclear, unrelated system), symptom was serve.sh
+# exiting 1 with NO output at all.
+_env_get() { [ -f "$LLM_ROOT/.env" ] && sed -n "s/^$1=//p" "$LLM_ROOT/.env" | tail -1 | sed 's/^["'\'']//;s/["'\'']$//'; true; }
 API_KEY="${API_KEY:-$(_env_get API_KEY)}"
 HF_TOKEN="${HF_TOKEN:-$(_env_get HF_TOKEN)}"; export HF_TOKEN
 

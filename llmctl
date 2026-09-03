@@ -7,9 +7,13 @@ refused up front if the unified-memory pool can't hold it. Ctrl-C quits.
 
     ./llmctl
 
-Wraps the same machinery as the CLI:
-  - systemd-managed models (llm-vllm@<slug> enabled) -> sudo systemctl start|stop
-  - on-demand models                                  -> models/<slug>/serve start|stop
+Start / stop:
+  - if the shared systemd template /etc/systemd/system/llm-vllm@.service is
+    installed, every model runs as an instance of it -> sudo systemctl
+    start|stop llm-vllm@<slug>. `(boot)` marks the instances that are also
+    `enabled` (come up on reboot) -- only qwen3.8-27b-fp8 + bge-m3.
+  - otherwise -> models/<slug>/serve start|stop (bare `docker run`).
+A model started as a bare container is still stopped correctly (docker rm).
 
 The per-model memory reservation is read from GPU_MEM_UTIL in each
 models/<slug>/model.env -- the same fraction of the 128 GB pool vLLM carves.
@@ -36,6 +40,7 @@ from _env import parse_env_file  # noqa: E402  (repo-local, see common/bench/_en
 POOL_BUDGET = 0.90
 
 TEMPLATE_UNIT = "/etc/systemd/system/llm-vllm@.service"
+SYSTEMD = os.path.exists(TEMPLATE_UNIT)  # shared template installed -> drive every model through it
 
 BOX = parse_env_file(REPO / "common" / "box.env")
 POOL_GB = int(BOX.get("BOX_UNIFIED_MEM_GB", "128"))
@@ -144,18 +149,16 @@ def state_of(m: Model, states: dict[str, tuple[str, str]]) -> str:
 RUNNING_STATES = {"healthy", "starting", "running", "unhealthy"}
 
 
-def systemd_managed(m: Model) -> bool:
-    """Mirror of common/lib.sh systemd_owns(): the template unit exists and the
-    instance is active/activating or enabled."""
-    if not os.path.exists(TEMPLATE_UNIT):
-        return False
-    act = subprocess.run(["systemctl", "is-active", m.unit],
-                         capture_output=True, text=True).stdout.strip()
-    if act in ("active", "activating"):
-        return True
-    en = subprocess.run(["systemctl", "is-enabled", m.unit],
-                        capture_output=True, text=True).stdout.strip()
-    return en == "enabled"
+def unit_active(m: Model) -> bool:
+    return subprocess.run(["systemctl", "is-active", m.unit],
+                          capture_output=True, text=True).stdout.strip() in ("active", "activating")
+
+
+def enabled(m: Model) -> bool:
+    """The instance autostarts on boot (`systemctl enable`)."""
+    return SYSTEMD and subprocess.run(
+        ["systemctl", "is-enabled", m.unit],
+        capture_output=True, text=True).stdout.strip() == "enabled"
 
 
 def health_ok(port: int) -> bool:
@@ -188,7 +191,7 @@ def fits(m: Model, models: list[Model], states: dict) -> tuple[bool, float, list
 # actions
 # --------------------------------------------------------------------------- #
 def _run_streaming(argv: list[str]) -> int:
-    """Run a start/stop command, echoing its output, returning the exit code.
+    """Run a command, echoing its output, returning the exit code.
     A Ctrl-C stops us waiting but leaves the container/unit alone."""
     print(f"  {DIM}$ {' '.join(argv)}{RESET}\n")
     proc = subprocess.Popen(argv, cwd=str(REPO))
@@ -196,6 +199,26 @@ def _run_streaming(argv: list[str]) -> int:
         return proc.wait()
     except KeyboardInterrupt:
         print(f"\n  {YELLOW}detached — the container keeps going in the background.{RESET}")
+        raise
+
+
+def _start_with_progress(argv: list[str], port: int) -> int:
+    """Run a (silent) start command, showing an elapsed / health line until it
+    returns. Ctrl-C detaches from the wait, not the start."""
+    print(f"  {DIM}$ {' '.join(argv)}{RESET}")
+    proc = subprocess.Popen(argv, cwd=str(REPO),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    t0 = time.time()
+    try:
+        while proc.poll() is None:
+            el = int(time.time() - t0)
+            mark = "healthy" if health_ok(port) else "loading…"
+            print(f"\r  ⏳ {el:4d}s  {mark}     ", end="", flush=True)
+            time.sleep(3)
+        print()
+        return proc.returncode
+    except KeyboardInterrupt:
+        print(f"\n  {YELLOW}detached — it keeps starting in the background.{RESET}")
         raise
 
 
@@ -213,8 +236,8 @@ def do_start(m: Model, models: list[Model], states: dict) -> None:
 
     print(f"  starting {BOLD}{m.slug}{RESET}  "
           f"({DIM}cold start: up to ~{m.startup // 60} min{RESET})")
-    if systemd_managed(m):
-        rc = _run_streaming(["sudo", "systemctl", "start", m.unit])
+    if SYSTEMD:
+        rc = _start_with_progress(["sudo", "-n", "systemctl", "start", m.unit], m.port)
     else:
         rc = _run_streaming([str(REPO / "models" / m.slug / "serve"), "start"])
 
@@ -226,20 +249,26 @@ def do_start(m: Model, models: list[Model], states: dict) -> None:
 
 
 def do_stop(m: Model, states: dict) -> None:
-    if systemd_managed(m):
-        ans = input(f"  {YELLOW}{m.slug} is a fixed systemd service — stop it? [y/N] {RESET}")
+    if enabled(m):
+        ans = input(f"  {YELLOW}{m.slug} autostarts on boot — stop it now? [y/N] {RESET}")
         if ans.strip().lower() not in ("y", "yes"):
             print("  cancelled.")
             return
-        rc = _run_streaming(["sudo", "systemctl", "stop", m.unit])
+    if SYSTEMD and unit_active(m):
+        rc = _run_streaming(["sudo", "-n", "systemctl", "stop", m.unit])
+    elif states.get(m.slug, ("", ""))[0] == "running":
+        # started as a bare container (models/<slug>/serve) — stop it directly
+        print(f"  {DIM}$ docker rm -f {m.container}{RESET}")
+        rc = docker("rm", "-f", m.container).returncode
     else:
-        rc = _run_streaming([str(REPO / "models" / m.slug / "serve"), "stop"])
+        print("  not running.")
+        return
     print(f"  {GREEN}✓ stopped {m.slug}{RESET}" if rc == 0
           else f"  {RED}✗ stop returned {rc}{RESET}")
 
 
 def _tail_logs(m: Model) -> None:
-    if systemd_managed(m):
+    if SYSTEMD:
         r = subprocess.run(["journalctl", "-u", m.unit, "-n", "20", "--no-pager"],
                            capture_output=True, text=True)
     else:
@@ -273,10 +302,10 @@ def render(models: list[Model], states: dict) -> None:
     print(f"   {DIM}#  model                        state       mem    port   role{RESET}")
     for i, m in enumerate(models, 1):
         st = state_of(m, states)
-        word = st + (" (systemd)" if systemd_managed(m) else "")
-        role = m.role
-        print(f"   {BOLD}{i}{RESET}  {m.slug:<27} {ICON[st]} {word:<18} "
-              f"{m.gmu:.2f}   {m.port}   {DIM}{role}{RESET}")
+        tag = " (boot)" if enabled(m) else (" (systemd)" if SYSTEMD else "")
+        word = st + tag
+        print(f"   {BOLD}{i}{RESET}  {m.slug:<27} {ICON[st]} {word:<19} "
+              f"{m.gmu:.2f}   {m.port}   {DIM}{m.role}{RESET}")
 
     total = running_total(models, states)
     filled = min(12, round(total / POOL_BUDGET * 12))
@@ -286,7 +315,8 @@ def render(models: list[Model], states: dict) -> None:
     warn = f"  {RED}over budget{RESET}" if total > POOL_BUDGET else ""
     print(f"\n   pool  {bar}  {total:.2f} / {POOL_BUDGET:.2f}   "
           f"({DIM}~{used_gb} / ~{budget_gb} GB usable{RESET}){warn}")
-    print(f"\n   {DIM}number → toggle · r → refresh · q or Ctrl-C → quit{RESET}")
+    print(f"\n   {DIM}(boot) = autostarts on reboot · number → toggle · "
+          f"r → refresh · q or Ctrl-C → quit{RESET}")
 
 
 # --------------------------------------------------------------------------- #

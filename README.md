@@ -60,16 +60,16 @@ Weights and the vLLM compile cache live outside the repo:
 |---|---|---|---|---|---|---|
 | `qwen3.8-27b-fp8` | `qwen3.8-27b-uncensored` | 8000 | `/v1/chat/completions` | 131072 | Apache 2.0, uncensored | benchmark-tuned, in daily use (systemd) |
 | `bge-m3` | `bge-m3` | 8001 | `/v1/embeddings` | 8192 | MIT | in use, embeddings for the litellm proxy (systemd) |
-| `gpt-oss-120b` | `gpt-oss-120b` | 8002 | `/v1/chat/completions` | 65536 | Apache 2.0, stock safety | benchmark-tuned, on-demand |
-| `qwen3-coder-30b-a3b-fp8` | `qwen3-coder-30b` | 8003 | `/v1/chat/completions` | 131072 | Apache 2.0 | quality coder — benchmark-tuned, on-demand |
-| `deepseek-coder-v2-lite-fp8` | `deepseek-coder-v2-lite` | 8004 | `/v1/chat/completions` | 131072 | DeepSeek license | performance coder — benchmark-tuned, on-demand |
+| `gpt-oss-120b` | `gpt-oss-120b` | 8002 | `/v1/chat/completions` | 65536 | Apache 2.0, stock safety | benchmark-tuned, on-demand (systemd, no autostart) |
+| `qwen3-coder-30b-a3b-fp8` | `qwen3-coder-30b` | 8003 | `/v1/chat/completions` | 131072 | Apache 2.0 | quality coder — benchmark-tuned, on-demand (systemd, no autostart) |
+| `deepseek-coder-v2-lite-fp8` | `deepseek-coder-v2-lite` | 8004 | `/v1/chat/completions` | 131072 | DeepSeek license | performance coder — benchmark-tuned, on-demand (systemd, no autostart) |
 
-All share the 128 GB unified pool — see **Running multiple models** below.
-**Fixed (systemd, boot-persistent):** `qwen3.8-27b-fp8` (`0.65`) + `bge-m3`
-(`0.12`). **On-demand** (`./serve start` / `stop`, no service): `gpt-oss-120b`,
-`qwen3-coder-30b-a3b-fp8`, `deepseek-coder-v2-lite-fp8` — each needs
-`qwen3.8-27b-fp8` stopped first for memory (confirmed by each model's sweep,
-`deepseek-coder-v2-lite` included).
+All share the 128 GB unified pool — see **Running multiple models** below. All
+run under the `llm-vllm@` systemd template (`llmctl` or `systemctl start|stop`);
+**only `qwen3.8-27b-fp8` + `bge-m3` are `enable`d (autostart on boot)**. The
+on-demand three (`gpt-oss-120b`, `qwen3-coder-30b-a3b-fp8`,
+`deepseek-coder-v2-lite-fp8`) each need `qwen3.8-27b-fp8` stopped first for
+memory (confirmed by each model's sweep, `deepseek-coder-v2-lite` included).
 
 ## Config layers
 
@@ -110,15 +110,22 @@ reservation (`GPU_MEM_UTIL` from `model.env`) and port. Type a number to
 toggle it — running → stop, stopped → start. A start is refused up front if
 the running models' `GPU_MEM_UTIL` sum plus the candidate would exceed the
 pool budget (`POOL_BUDGET`, default `0.90` — host keeps ~0.10), telling you
-which model to stop first. Stopping a fixed systemd model (`qwen3.8-27b-fp8`,
-`bge-m3`) asks `y/N` first. `q` or Ctrl-C quits.
+which model to stop first. `(boot)` marks the models that autostart on reboot
+(`qwen3.8-27b-fp8`, `bge-m3`); stopping one of those asks `y/N` first.
+`q` or Ctrl-C quits.
 
-It just wraps `models/<slug>/serve start|stop` (on-demand models) and
-`sudo systemctl start|stop llm-vllm@<slug>` (systemd models) — same as doing
-it by hand, minus the memory arithmetic. The one-line role shown per model
-comes from a `# llmctl: …` comment in each `model.env`.
+It wraps `sudo systemctl start|stop llm-vllm@<slug>` when the systemd template
+is installed (all models here), else `models/<slug>/serve` — same as doing it
+by hand, minus the memory arithmetic. A model that was started as a bare
+container (`serve start`) is still stopped correctly. The one-line role shown
+per model comes from a `# llmctl: …` comment in each `model.env`.
 
 ## Serve a model
+
+The lower-level path (`llmctl` is the everyday one). Use `./serve` directly for
+`status` / `logs`, or a one-off env override that systemd can't take, e.g.
+`MAX_MODEL_LEN=32768 ./serve start`. `serve start`/`stop` defer to `systemctl`
+while the model's systemd instance is active.
 
 ```bash
 cd models/<slug>        # qwen3.8-27b-fp8 | bge-m3 | gpt-oss-120b | qwen3-coder-30b-a3b-fp8 | deepseek-coder-v2-lite-fp8
@@ -201,20 +208,28 @@ sudo systemctl restart llm-vllm@<slug>   # returns once serving again
 ./serve uninstall-service
 ```
 
-Currently installed: `llm-vllm@qwen3.8-27b-fp8` and `llm-vllm@bge-m3` (both
-enabled, boot automatically). `gpt-oss-120b`, `qwen3-coder-30b-a3b-fp8` and
-`deepseek-coder-v2-lite-fp8` are **on-demand by design** — not installed as
-services, started ad-hoc via `./serve start` / `./serve stop`.
+The `llm-vllm@.service` template is installed, so **every** model runs as an
+instance of it — `sudo systemctl start|stop llm-vllm@<slug>` (or `llmctl`)
+for all of them. Only two are `enable`d, i.e. autostart on reboot:
 
-One template unit, one instance per model slug. systemd is the single
-supervisor — in this mode `serve.sh ... run` execs `docker run --rm` in the
-foreground, so no container `--restart` policy races with it on boot. If the
-unit is installed, use `systemctl`, not the bare `start`/`stop`.
+| enabled (autostart) | systemd instance, no autostart |
+|---|---|
+| `qwen3.8-27b-fp8`, `bge-m3` | `gpt-oss-120b`, `qwen3-coder-30b-a3b-fp8`, `deepseek-coder-v2-lite-fp8` |
 
-**The `llm-vllm@.service` template is shared and regenerated by every
-`install-service`** with that model's `TimeoutStartSec` / `STARTUP_TIMEOUT` —
-so `bge-m3/model.env` deliberately keeps `STARTUP_TIMEOUT=1200` (= qwen's) to
-leave the installed unit byte-identical.
+The on-demand three come up only when you start them and stay down after a
+reboot. To flip that: `sudo systemctl enable llm-vllm@<slug>` (autostart) /
+`disable` (not) — but see the memory math below before enabling a big model.
+
+One template unit, one instance per slug. systemd is the single supervisor —
+`serve.sh ... run` execs `docker run --rm` in the foreground, no `--restart`
+policy races it on boot. With the unit installed, use `systemctl` / `llmctl`,
+not the bare `serve start`/`stop`.
+
+**The template's `TimeoutStartSec` is 1200 s** (from the last `install-service`,
+run by a `STARTUP_TIMEOUT=1200` model). That covers a warm start of any model;
+a fully cold `gpt-oss-120b` (compile cache wiped, ~63 GiB load) could exceed
+it — re-run `models/gpt-oss-120b/serve install-service` once to regenerate the
+template at 1800 if that ever bites.
 
 ---
 
@@ -229,12 +244,14 @@ never collide.
 **Fixed pair (systemd):** qwen (`0.65`) + bge-m3 (`0.12`) = `0.77`, ~0.23 of
 the pool left for the host — fits, both boot-persistent.
 
+`llmctl` enforces this as `sum(GPU_MEM_UTIL of running) + candidate <=
+POOL_BUDGET` (0.90) before it starts anything.
+
 **On-demand models — all need qwen3.8 stopped first (memory):**
 - **`gpt-oss-120b` (`0.85`)** — ~66 GiB weights + ~34-35 GiB KV, ~101 GB of
   the ~109 GB carved.
-- **`qwen3-coder-30b-a3b-fp8` (`0.40` placeholder)** — MoE, ~31 GiB weights
-  (all experts resident, only compute is sparse) + KV. `GPU_MEM_UTIL` from
-  its sweep.
+- **`qwen3-coder-30b-a3b-fp8` (`0.50`)** — MoE, ~29 GiB weights (all experts
+  resident, only compute is sparse) + 29 GiB KV pool at 131072; peak ~72 GB.
 - **`deepseek-coder-v2-lite-fp8` (`0.30`, benchmark-tuned)** — ~16 GiB
   weights + cheap MLA KV, but the sweep showed ~44-52 GiB peak unified-mem
   use → **does not** co-reside with the fixed pair either (`0.30` + qwen's

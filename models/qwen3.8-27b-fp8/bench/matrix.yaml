@@ -1,0 +1,213 @@
+# Benchmark matrix for orcarouter/Qwen3.8-27B-Uncensored-FP8 on NVIDIA DGX Spark (GB10)
+#
+#   sg docker -c ".hf-venv/bin/python common/bench/run.py --model models/qwen3.8-27b-fp8 --suite <name>"
+#
+# Image / caches / repo id / served name / port come from  common/box.env +
+# models/qwen3.8-27b-fp8/model.env . This file is ONLY the sweep: `models` (repo
+# ids to resolve from the HF cache), per-config knobs, workloads, and suites.
+# One container per `config`, paired with `workloads` driven by `vllm bench serve`.
+#
+# GB10 notes:
+#  - 128 GB *unified* LPDDR5x: --gpu-memory-utilization carves from the whole pool.
+#  - VLLM_USE_DEEP_GEMM=0 mandatory (asserts on sm_121); set in box.env + env below.
+#  - nvidia-smi reports N/A for GPU memory; the runner measures `free -m`.
+
+defaults:
+  models:                              # repo ids; run.py resolves the newest local snapshot
+    fp8:  {path: orcarouter/Qwen3.8-27B-Uncensored-FP8}
+    bf16: {path: orcarouter/Qwen3.8-27B-Uncensored}
+  # appended to every `vllm serve` in the sweep
+  common_flags:
+    - --language-model-only            # text-only for the throughput sweep (vision A/B is separate)
+    - --trust-remote-code
+    - --reasoning-parser=qwen3
+    - --enable-auto-tool-choice
+    - --tool-call-parser=qwen3_coder
+  env:
+    VLLM_USE_DEEP_GEMM: "0"
+    LANG: C.UTF-8
+    LC_ALL: C.UTF-8
+    HF_HUB_OFFLINE: "1"
+  # per-config knobs and their defaults
+  config_defaults:
+    model: fp8
+    gpu_memory_utilization: 0.65
+    max_model_len: 32768
+    max_num_seqs: 32
+    kv_cache_dtype: fp8          # fp8 | auto(=bf16)
+    spec: {method: mtp, num_speculative_tokens: 3}   # or null for no speculation
+    prefix_caching: false        # vLLM default with MTP in 0.24.0
+    max_num_batched_tokens: null # null => vLLM default
+    extra_flags: []
+  # per-workload knobs and their defaults (fed to `vllm bench serve`)
+  workload_defaults:
+    input_len: 1024
+    output_len: 1024
+    num_prompts: 16
+    concurrency: 16
+    request_rate: inf
+    ignore_eos: true
+    warmups: 3
+    prefix_len: 0            # shared random prefix tokens before the per-request suffix (0 = off, no-op for every workload below except agent_turn_*)
+    random_range_ratio: 0.0  # +/- range on the suffix length; 0 = exact input_len
+  server_startup_timeout_s: 1200
+  teardown_pause_s: 12
+
+# ----------------------------------------------------------------------------
+workloads:
+  # --- harness validation ------------------------------------------------
+  smoke_stream: {input_len: 256, output_len: 256, num_prompts: 3, concurrency: 1, warmups: 1}
+  smoke_batch:  {input_len: 512, output_len: 256, num_prompts: 8, concurrency: 8, warmups: 1}
+
+  # --- MTP-sweep workloads (kept short; MTP effect shows at all batch sizes) ---
+  single_stream:      {input_len: 512,  output_len: 1024, num_prompts: 3,  concurrency: 1}
+  batch8_balanced:    {input_len: 1024, output_len: 1024, num_prompts: 16, concurrency: 8}
+  codegen_decode:     {input_len: 1024, output_len: 4096, num_prompts: 8,  concurrency: 8}
+  saturate32:         {input_len: 1024, output_len: 1024, num_prompts: 64, concurrency: 32}
+  saturate48:         {input_len: 1024, output_len: 1024, num_prompts: 96,  concurrency: 48}
+  saturate64:         {input_len: 1024, output_len: 1024, num_prompts: 128, concurrency: 64}
+
+  # --- 2026-08-31 gap-closing additions: agent-shaped traffic (large shared
+  #     system prompt/tool schema + short varying turn) for the prefix-caching
+  #     A/B -- everything else in this file uses fully independent random
+  #     prompts, which can't exercise prefix reuse at all. ---
+  agent_turn_solo:     {prefix_len: 6000, input_len: 300, output_len: 400,
+                        num_prompts: 20, concurrency: 1, random_range_ratio: 0.3}
+  agent_turn_parallel: {prefix_len: 6000, input_len: 300, output_len: 400,
+                        num_prompts: 40, concurrency: 8, random_range_ratio: 0.3}
+
+  # --- context-scaling workloads (input ~45% of ctx; n scaled to keep KV real) ---
+  ctx4k_load:    {input_len: 1800,   output_len: 400,  num_prompts: 12, concurrency: 8}
+  ctx8k_load:    {input_len: 3600,   output_len: 800,  num_prompts: 12, concurrency: 8}
+  ctx16k_load:   {input_len: 7200,   output_len: 1600, num_prompts: 8,  concurrency: 6}
+  ctx32k_load:   {input_len: 14000,  output_len: 3000, num_prompts: 6,  concurrency: 4}
+  ctx64k_load:   {input_len: 28000,  output_len: 4000, num_prompts: 4,  concurrency: 3}
+  ctx128k_load:  {input_len: 56000,  output_len: 8000, num_prompts: 2,  concurrency: 2}
+  ctx256k_load:  {input_len: 110000, output_len: 8000, num_prompts: 1,  concurrency: 1}
+
+# ----------------------------------------------------------------------------
+configs:
+  # --- FP8 MTP token sweep (32k, fixed everything except spec tokens) -------
+  fp8_spec_off: {model: fp8, spec: null}
+  fp8_spec_1:   {model: fp8, spec: {method: mtp, num_speculative_tokens: 1}}
+  fp8_spec_2:   {model: fp8, spec: {method: mtp, num_speculative_tokens: 2}}
+  fp8_spec_3:   {model: fp8, spec: {method: mtp, num_speculative_tokens: 3}}
+  fp8_spec_4:   {model: fp8, spec: {method: mtp, num_speculative_tokens: 4}}
+
+  # --- FP8 context scaling (mtp=3, kv fp8, gmu 0.80 to admit the big KV) ----
+  fp8_ctx_4k:   {model: fp8, max_model_len: 4096,   max_num_seqs: 16, gpu_memory_utilization: 0.80}
+  fp8_ctx_8k:   {model: fp8, max_model_len: 8192,   max_num_seqs: 16, gpu_memory_utilization: 0.80}
+  fp8_ctx_16k:  {model: fp8, max_model_len: 16384,  max_num_seqs: 12, gpu_memory_utilization: 0.80}
+  fp8_ctx_32k:  {model: fp8, max_model_len: 32768,  max_num_seqs: 8,  gpu_memory_utilization: 0.80}
+  fp8_ctx_64k:  {model: fp8, max_model_len: 65536,  max_num_seqs: 6,  gpu_memory_utilization: 0.80}
+  fp8_ctx_128k: {model: fp8, max_model_len: 131072, max_num_seqs: 3,  gpu_memory_utilization: 0.85}
+  fp8_ctx_256k: {model: fp8, max_model_len: 262144, max_num_seqs: 1,  gpu_memory_utilization: 0.85}
+
+  # --- KV "dequantization cliff" check: same as fp8_ctx_64k but kv=auto(bf16).
+  #     GB10 is bandwidth-rich unified memory, not VRAM-constrained -- a
+  #     hardware-level report (llama.cpp/GGML KV quant on this exact box)
+  #     found KV quantization can get SLOWER than f16 at deep context (dequant
+  #     compute not offset by bandwidth saved). Our own kv_sweep never tested
+  #     this deep (short workloads only) -- ctx64k_load (28k prefix, 4k decode)
+  #     is the proxy. See notes.md "2026-08-31" section for the result.
+  fp8_ctx_64k_kv_auto: {model: fp8, max_model_len: 65536, max_num_seqs: 6,
+                        gpu_memory_utilization: 0.80, kv_cache_dtype: auto}
+
+  # --- 2026-08-31 gap-closing: production combo (gmu 0.65, seqs 32) at the
+  #     REAL 65536 context, never load-tested together before. Also settles
+  #     MTP_TOKENS 2-vs-3 at this context (model.env recommends 3, ships 2). ---
+  prod_mtp2: {model: fp8, max_model_len: 65536, spec: {method: mtp, num_speculative_tokens: 2}}
+  prod_mtp3: {model: fp8, max_model_len: 65536, spec: {method: mtp, num_speculative_tokens: 3}}
+
+  # --- prefix-caching A/B, at the production combo + winning MTP (mtp2 used
+  #     here as the anchor; rerun with mtp3's value if prod_mtp_sweep_65k flips it) ---
+  prefix_off: {model: fp8, max_model_len: 65536, spec: {method: mtp, num_speculative_tokens: 2}, prefix_caching: false}
+  prefix_on:  {model: fp8, max_model_len: 65536, spec: {method: mtp, num_speculative_tokens: 2}, prefix_caching: true}
+
+  # --- max-num-seqs past 32, at the production context. gpu_memory_utilization
+  #     deliberately stays 0.65 (the production budget) -- a config that fails
+  #     to start or degrades IS the answer, not a reason to raise it and rerun. ---
+  prod_seqs48: {model: fp8, max_model_len: 65536, max_num_seqs: 48, spec: {method: mtp, num_speculative_tokens: 2}}
+  prod_seqs64: {model: fp8, max_model_len: 65536, max_num_seqs: 64, spec: {method: mtp, num_speculative_tokens: 2}}
+
+  # --- moe-backend probe, correctness-gated (manual curl check required,
+  #     vllm bench serve only counts tokens -- see gpt-oss-120b's precedent).
+  #     Only `triton` tried against `auto`: flashinfer_cutlass/flashinfer_trtllm
+  #     skipped (vLLM issue #43507 -- CUTLASS FP8 MoE broken on SM_120/SM_121,
+  #     a hardware-class issue), deep_gemm skipped (fights the box-wide
+  #     mandatory VLLM_USE_DEEP_GEMM=0). --attention-backend NOT forced this
+  #     round -- just log what `auto` picks (docker logs | grep -i attention). ---
+  backend_auto:   {model: fp8, max_model_len: 65536, spec: {method: mtp, num_speculative_tokens: 2}, extra_flags: []}
+  backend_triton: {model: fp8, max_model_len: 65536, spec: {method: mtp, num_speculative_tokens: 2}, extra_flags: [--moe-backend, triton]}
+
+  # --- BF16 MTP token sweep (mirror of FP8; kv auto = bf16, the true baseline) ---
+  bf16_spec_off: {model: bf16, spec: null,                                      kv_cache_dtype: auto, gpu_memory_utilization: 0.70}
+  bf16_spec_2:   {model: bf16, spec: {method: mtp, num_speculative_tokens: 2},  kv_cache_dtype: auto, gpu_memory_utilization: 0.70}
+  bf16_spec_3:   {model: bf16, spec: {method: mtp, num_speculative_tokens: 3},  kv_cache_dtype: auto, gpu_memory_utilization: 0.70}
+  bf16_spec_4:   {model: bf16, spec: {method: mtp, num_speculative_tokens: 4},  kv_cache_dtype: auto, gpu_memory_utilization: 0.70}
+
+# ----------------------------------------------------------------------------
+# A suite = ordered list of [config, [workloads...]] pairs.
+suites:
+  mtp_sweep_fp8:
+    - [fp8_spec_off, [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [fp8_spec_1,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [fp8_spec_2,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [fp8_spec_3,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [fp8_spec_4,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+
+  context_scaling_fp8:
+    - [fp8_ctx_4k,   [ctx4k_load]]
+    - [fp8_ctx_8k,   [ctx8k_load]]
+    - [fp8_ctx_16k,  [ctx16k_load]]
+    - [fp8_ctx_32k,  [ctx32k_load]]
+    - [fp8_ctx_64k,  [ctx64k_load]]
+    - [fp8_ctx_128k, [ctx128k_load]]
+    - [fp8_ctx_256k, [ctx256k_load]]
+
+  mtp_sweep_bf16:
+    - [bf16_spec_off, [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [bf16_spec_2,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [bf16_spec_3,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [bf16_spec_4,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+
+  # convenience: the full overnight batch, in run order
+  overnight:
+    include: [mtp_sweep_fp8, context_scaling_fp8, mtp_sweep_bf16]
+
+  # tiny end-to-end validation of the harness (~1 server start, ~2 short runs)
+  smoke:
+    - [fp8_spec_3, [smoke_stream, smoke_batch]]
+
+  # ==========================================================================
+  # 2026-08-31 gap-closing sweep: production combo (65536 ctx + real 0.65/32)
+  # never load-tested together, agent-shaped prefix-caching A/B, seqs past 32,
+  # moe-backend probe, KV dequant-cliff check. Run order = cheapest/highest-
+  # value first. See notes.md "2026-08-31" section for results.
+  # ==========================================================================
+  smoke_prefix:
+    - [prefix_off, [smoke_stream]]        # validates the run.py prefix/range-ratio plumbing, 1 cold load
+
+  prod_mtp_sweep_65k:                      # the core gap -- 2 cold loads
+    - [prod_mtp2, [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [prod_mtp3, [single_stream, batch8_balanced, codegen_decode, saturate32]]
+
+  kv_dequant_cliff_check:                  # 2 cold loads (fp8_ctx_64k re-run fresh for a clean same-session comparison)
+    - [fp8_ctx_64k,         [ctx64k_load]]
+    - [fp8_ctx_64k_kv_auto, [ctx64k_load]]
+
+  prefix_cache_ab:                         # 2 cold loads
+    - [prefix_off, [agent_turn_solo, agent_turn_parallel]]
+    - [prefix_on,  [agent_turn_solo, agent_turn_parallel]]
+
+  seqs_sweep_ext_65k:                      # 3 cold loads; gpu_mem_util stays 0.65 (production budget)
+    - [prod_mtp2,   [single_stream, saturate32]]   # =32 anchor, reused from prod_mtp_sweep_65k's config
+    - [prod_seqs48, [single_stream, saturate48]]
+    - [prod_seqs64, [single_stream, saturate64]]
+
+  moe_backend_probe:                       # 2 cold loads, correctness-gated (manual curl required)
+    - [backend_auto,   [single_stream, batch8_balanced]]
+    - [backend_triton, [single_stream, batch8_balanced]]
+
+  gap_close_65k:
+    include: [prod_mtp_sweep_65k, kv_dequant_cliff_check, prefix_cache_ab, seqs_sweep_ext_65k, moe_backend_probe]

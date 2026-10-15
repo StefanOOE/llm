@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Thin wrapper: run common/serve.sh against THIS model directory.
+#   ./serve [start|run|stop|logs|status|install-service|uninstall-service]
+here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+exec "${here}/../../common/serve.sh" "$here" "$@"

@@ -1,0 +1,16 @@
+# Patched vLLM image: base NGC image ships xgrammar==0.2.0, but vLLM 0.24.0's
+# tool-calling codepath imports normalize_tool_choice, added in xgrammar 0.2.4
+# -> every request with "tools" fails HTTP 500
+# ("cannot import name 'normalize_tool_choice' from 'xgrammar'").
+# Known NGC packaging bug; fix is a --no-deps bump so nothing else in the
+# image (transformers, torch, etc.) gets pulled along and potentially broken.
+#
+# Build:
+#   docker build -t vllm-qwen:26.07-xgrammar024 \
+#     -f models/qwen3.8-27b-fp8/docker/Dockerfile.xgrammar024 \
+#     models/qwen3.8-27b-fp8/docker
+#
+# If 26.07 ever needs a fallback for other tool-calling quirks, NVIDIA forum
+# reports point at image tag 26.06 as the safer base — swap the FROM line.
+FROM nvcr.io/nvidia/vllm:26.07-py3
+RUN pip install --no-cache-dir --no-deps xgrammar==0.2.4

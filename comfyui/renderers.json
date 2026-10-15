@@ -1,0 +1,9 @@
+{
+  "_comment": "Renderer registry for bridge.py: request \"model\" id -> workflow template (path relative to this file), weight stack ('qwen' | 'flux', selects the preset block in presets.json and whether a switch unloads the other stack), display label (llmctl). Optional per renderer: \"lora_node\" = id of a LoraLoaderModelOnly node in that workflow whose strength the request field lora_strength sets. Optional top level: \"extra_lora\" = {\"file\": <models/loras/ file>, \"stacks\": [...]}, spliced in when a request sets lora2. A box-local registry at comfyui/local/renderers.json (git-ignored, mounted at /opt/bridge-local) replaces this file entirely.",
+  "default": "qwen",
+  "renderers": {
+    "qwen": {"workflow": "workflow-text2image.json",      "stack": "qwen", "label": "qwen-image"},
+    "flux": {"workflow": "workflow-flux-text2image.json", "stack": "flux", "label": "flux"}
+  },
+  "extra_lora": null
+}

@@ -1,0 +1,86 @@
+{
+  "text_only": {
+    "start": {
+      "ok": true,
+      "startup_s": 226.1,
+      "mem_base": 5019,
+      "mem_ready": 86927,
+      "load_gib": 28.08,
+      "load_s": 186.529183,
+      "kv_gib": 46.18,
+      "kv_tok": 729088.0,
+      "max_conc": 44.5
+    },
+    "bench": [
+      {
+        "name": "single_stream",
+        "out_tok_s": 12.8,
+        "ttft_p50": 613,
+        "accept_len": 2.14
+      },
+      {
+        "name": "batch8_balanced",
+        "out_tok_s": 82.4,
+        "ttft_p50": 1605,
+        "accept_len": 2.23
+      },
+      {
+        "name": "saturate32",
+        "out_tok_s": 193.8,
+        "ttft_p50": 2336,
+        "accept_len": 2.27
+      }
+    ],
+    "ocr": null
+  },
+  "multimodal": {
+    "start": {
+      "ok": true,
+      "startup_s": 386.7,
+      "mem_base": 4909,
+      "mem_ready": 90105,
+      "load_gib": 28.95,
+      "load_s": 193.633117,
+      "kv_gib": 45.55,
+      "kv_tok": 719257.0,
+      "max_conc": 43.9
+    },
+    "bench": [
+      {
+        "name": "single_stream",
+        "out_tok_s": 12.4,
+        "ttft_p50": 619,
+        "accept_len": 2.09
+      },
+      {
+        "name": "batch8_balanced",
+        "out_tok_s": 86.8,
+        "ttft_p50": 1613,
+        "accept_len": 2.41
+      },
+      {
+        "name": "saturate32",
+        "out_tok_s": 202.2,
+        "ttft_p50": 3767,
+        "accept_len": 2.36
+      }
+    ],
+    "ocr": {
+      "latency_s": 7.5,
+      "ok": true,
+      "fields_read": [
+        "2026-0842",
+        "1,337",
+        "2026-09-15",
+        "GB10-QWEN-BENCH"
+      ],
+      "usage": {
+        "prompt_tokens": 273,
+        "total_tokens": 390,
+        "completion_tokens": 117,
+        "prompt_tokens_details": null
+      },
+      "text": "Based on the image provided, here is the verbatim text and the list of shapes and their colors.\n\n**Verbatim Text:**\n```\nINVOICE #2026-0842\nAmount due: EUR 1,337.00\nDue date: 2026-09-15\nRef: GB10-QWEN-BENCH\n```\n\n**Shapes and Colours:**\n- **Circle:** Red (with a black outline)\n- **Rectangle:** Dark blue (with a black outline)"
+    }
+  }
+}

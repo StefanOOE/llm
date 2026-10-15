@@ -1,0 +1,157 @@
+# Benchmark matrix for nvidia/Qwen3.8-27B-NVFP4 on NVIDIA DGX Spark (GB10)
+#
+#   sg docker -c ".hf-venv/bin/python common/bench/run.py --model models/qwen3.8-27b-nvfp4 --suite <name>"
+#
+# Image / caches / repo id / served name / port come from  common/box.env +
+# models/qwen3.8-27b-nvfp4/model.env . This file is ONLY the sweep: `models`
+# (repo ids to resolve from the HF cache), per-config knobs, workloads, and
+# suites. One container per `config`, paired with `workloads` driven by
+# `vllm bench serve`.
+#
+# GB10 notes:
+#  - 128 GB *unified* LPDDR5x: --gpu-memory-utilization carves from the whole pool.
+#  - VLLM_USE_DEEP_GEMM=0 mandatory (asserts on sm_121); set in box.env + env below.
+#  - nvidia-smi reports N/A for GPU memory; the runner measures `free -m`.
+#
+# GDN Triton autotuner OOM (vLLM #36598/#33857, model.env / notes.md
+# "GDN Triton autotuner workaround"): this checkpoint keeps linear_attn at
+# FP8 (same 48 GDN layers as qwen3.8-27b-fp8), so every cold start here hits
+# the SAME unwarmed-autotuner risk on the first real GDN prefill.
+# VLLM_TRITON_FORCE_FIRST_CONFIG=1 is set below in `env:` -- REQUIRED, not
+# optional. None of the OTHER model.env `DOCKER_ENV` settings are picked up
+# automatically by run.py (it only reads image/caches/repo id/served
+# name/port from model.env), so this must be listed explicitly here too.
+# fp8's own matrix.yaml predates the 2026-09-10 discovery of this bug and
+# does not have it -- not evidence it's unneeded, just older.
+#
+# Baseline for comparison: models/qwen3.8-27b-fp8/bench/results/
+# prod_mtp_sweep_65k_20260831_215815/summary.csv (mtp3 row: max_model_len
+# 65536, gpu_memory_utilization 0.65, max_num_seqs 32, kv fp8 -- single_stream
+# output_tok_s 14.43, saturate32 output_tok_s 210.21). `nvfp4_65k_kv_fp8`
+# below reproduces that exact config for nvfp4 (head_to_head_65k suite) --
+# NOT re-running fp8 here, just comparing against its already-recorded numbers.
+
+defaults:
+  models:                              # repo ids; run.py resolves the newest local snapshot
+    nvfp4: {path: nvidia/Qwen3.8-27B-NVFP4}
+  # appended to every `vllm serve` in the sweep
+  common_flags:
+    - --language-model-only            # text-only for the throughput sweep (vision not swept here)
+    - --trust-remote-code
+    - --reasoning-parser=qwen3
+    - --enable-auto-tool-choice
+    - --tool-call-parser=qwen3_coder
+  env:
+    VLLM_USE_DEEP_GEMM: "0"
+    VLLM_TRITON_FORCE_FIRST_CONFIG: "1"  # GDN autotuner OOM workaround -- REQUIRED, see header
+    LANG: C.UTF-8
+    LC_ALL: C.UTF-8
+    HF_HUB_OFFLINE: "1"
+  # per-config knobs and their defaults -- match the DEPLOYED production
+  # default (model.env) unless a config overrides it, so the MTP sweep below
+  # tests the actual live settings rather than an arbitrary smaller context.
+  config_defaults:
+    model: nvfp4
+    gpu_memory_utilization: 0.52
+    max_model_len: 131072
+    max_num_seqs: 32
+    kv_cache_dtype: fp8          # fp8 | nvfp4 | auto(=bf16) -- nvfp4 is unique to this checkpoint, see kv_dtype_ab_nvfp4
+    spec: {method: mtp, num_speculative_tokens: 3}   # or null for no speculation
+    prefix_caching: false        # vLLM default with MTP in 0.24.0 (matches qwen3.8-27b-fp8's sweep convention)
+    max_num_batched_tokens: null # null => vLLM default
+    extra_flags: []
+  # per-workload knobs and their defaults (fed to `vllm bench serve`)
+  workload_defaults:
+    input_len: 1024
+    output_len: 1024
+    num_prompts: 16
+    concurrency: 16
+    request_rate: inf
+    ignore_eos: true
+    warmups: 3
+    prefix_len: 0
+    random_range_ratio: 0.0
+  server_startup_timeout_s: 1200
+  teardown_pause_s: 12
+
+# ----------------------------------------------------------------------------
+workloads:
+  # --- harness validation --------------------------------------------------
+  smoke_stream: {input_len: 256, output_len: 256, num_prompts: 3, concurrency: 1, warmups: 1}
+  smoke_batch:  {input_len: 512, output_len: 256, num_prompts: 8, concurrency: 8, warmups: 1}
+
+  # --- MTP-sweep / head-to-head workloads (same shape as qwen3.8-27b-fp8's
+  #     mtp_sweep_fp8, for a like-for-like comparison methodology) ----------
+  single_stream:   {input_len: 512,  output_len: 1024, num_prompts: 3,  concurrency: 1}
+  batch8_balanced: {input_len: 1024, output_len: 1024, num_prompts: 16, concurrency: 8}
+  codegen_decode:  {input_len: 1024, output_len: 4096, num_prompts: 8,  concurrency: 8}
+  saturate32:      {input_len: 1024, output_len: 1024, num_prompts: 64, concurrency: 32}
+
+  # --- deep-context KV stress, reused from fp8's kv_dequant_cliff_check ---
+  ctx64k_load: {input_len: 28000, output_len: 4000, num_prompts: 4, concurrency: 3}
+
+# ----------------------------------------------------------------------------
+configs:
+  # --- MTP token sweep @ the DEPLOYED production combo (131072/0.52/32) ---
+  #     Answers: is MTP=3 (inherited from fp8) actually optimal for NVFP4's
+  #     own accept-rate, or should the deployed default change?
+  #     nvfp4_spec_3 (extra_flags empty = `auto` backend selection) also
+  #     doubles as the "auto" baseline for backend_probe_nvfp4 below -- no
+  #     need for a separate identical cold load.
+  nvfp4_spec_off: {spec: null}
+  nvfp4_spec_1:   {spec: {method: mtp, num_speculative_tokens: 1}}
+  nvfp4_spec_2:   {spec: {method: mtp, num_speculative_tokens: 2}}
+  nvfp4_spec_3:   {spec: {method: mtp, num_speculative_tokens: 3}}   # = deployed default = backend_auto baseline
+  nvfp4_spec_4:   {spec: {method: mtp, num_speculative_tokens: 4}}
+
+  # --- head-to-head vs FP8, at FP8's exact already-benched production combo
+  #     (ctx65536/gmu0.65/seqs32/mtp3/kv fp8) -- this config also serves as
+  #     the kv_cache_dtype=fp8 arm of kv_dtype_ab_nvfp4 below (same knobs).
+  nvfp4_65k_kv_fp8: {max_model_len: 65536, gpu_memory_utilization: 0.65,
+                     spec: {method: mtp, num_speculative_tokens: 3}}
+
+  # --- KV cache dtype A/B, same 65536/mtp3 anchor as above. `nvfp4` is a
+  #     literal --kv-cache-dtype choice unique to this checkpoint (untested
+  #     at smoke-test time); `auto` (bf16) is the true baseline, gmu bumped
+  #     slightly since bf16 KV entries are bigger than fp8's, mirroring how
+  #     fp8's own bf16 configs got +0.05 over the fp8 configs. -----------
+  nvfp4_65k_kv_nvfp4: {max_model_len: 65536, gpu_memory_utilization: 0.65, kv_cache_dtype: nvfp4,
+                       spec: {method: mtp, num_speculative_tokens: 3}}
+  nvfp4_65k_kv_auto:  {max_model_len: 65536, gpu_memory_utilization: 0.70, kv_cache_dtype: auto,
+                       spec: {method: mtp, num_speculative_tokens: 3}}
+
+  # --- moe/linear-backend probe, correctness-gated (manual curl check
+  #     required -- vllm bench serve only counts tokens, same caveat as
+  #     fp8's own moe_backend_probe). `auto` picked FlashInferCutlassNvFp4-
+  #     LinearKernel at smoke-test time (2026-09-14); flashinfer_b12x is
+  #     documented for NVFP4 on SM12x/DGX Spark specifically but was never
+  #     selected by `auto` or tried under load. -------------------------
+  nvfp4_backend_b12x: {extra_flags: [--moe-backend, flashinfer_b12x, --linear-backend, flashinfer_b12x]}
+
+# ----------------------------------------------------------------------------
+# A suite = ordered list of [config, [workloads...]] pairs.
+suites:
+  # tiny end-to-end validation of the harness (~1 server start, ~2 short runs)
+  smoke:
+    - [nvfp4_spec_3, [smoke_stream, smoke_batch]]
+
+  mtp_sweep_nvfp4:                          # 5 cold loads -- the core question
+    - [nvfp4_spec_off, [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [nvfp4_spec_1,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [nvfp4_spec_2,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [nvfp4_spec_3,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+    - [nvfp4_spec_4,   [single_stream, batch8_balanced, codegen_decode, saturate32]]
+
+  head_to_head_65k:                         # 1 cold load -- also the kv_fp8 arm below
+    - [nvfp4_65k_kv_fp8, [single_stream, batch8_balanced, codegen_decode, saturate32, ctx64k_load]]
+
+  kv_dtype_ab_nvfp4:                        # 2 cold loads (kv_fp8 arm reused from head_to_head_65k)
+    - [nvfp4_65k_kv_nvfp4, [single_stream, ctx64k_load]]
+    - [nvfp4_65k_kv_auto,  [single_stream, ctx64k_load]]
+
+  backend_probe_nvfp4:                      # 1 cold load (auto arm reused from nvfp4_spec_3 above)
+    - [nvfp4_backend_b12x, [single_stream, batch8_balanced]]
+
+  # convenience: the full sweep, in run order (9 cold loads total, ~2-4h)
+  gap_close_nvfp4:
+    include: [mtp_sweep_nvfp4, head_to_head_65k, kv_dtype_ab_nvfp4, backend_probe_nvfp4]

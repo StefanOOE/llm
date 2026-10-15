@@ -1,0 +1,62 @@
+{
+  "_comment": "Render presets for bridge.py, per stack (renderers.json assigns each renderer a stack: 'flux' = FLUX.1-dev based, 'qwen' = Qwen-Image-2512 + Lightning). Resolution order: request fields > preset (request 'preset' > comfyui-cache/bridge/default-preset > 'default' below) > nothing else. 'cfg' is real CFG -- keep 1.0 for both stacks (FLUX-dev is guidance-distilled, its strength knob is 'guidance' = FluxGuidance; Qwen+Lightning is distilled to cfg 1 / 4 steps). See notes.md 'Presets' for how the A1111/SD1.5 rules of thumb map onto these models and where the values came from.",
+  "default": "realistic",
+  "presets": {
+    "realistic": {
+      "flux": {
+        "steps": 28, "cfg": 1.0, "guidance": 2.5, "sampler": "dpmpp_2m", "scheduler": "beta",
+        "hires":    {"enabled": false, "scale": 1.5, "denoise": 0.4, "steps": 20},
+        "face_fix": {"enabled": true,  "steps": 20, "denoise": 0.4},
+        "hand_fix": {"enabled": false, "steps": 20, "denoise": 0.4}
+      },
+      "qwen": {
+        "steps": 4, "cfg": 1.0, "sampler": "euler", "scheduler": "simple",
+        "hires":    {"enabled": false, "scale": 1.5, "denoise": 0.4, "steps": 4},
+        "face_fix": {"enabled": true,  "steps": 4, "denoise": 0.4},
+        "hand_fix": {"enabled": false, "steps": 4, "denoise": 0.4}
+      }
+    },
+    "final": {
+      "flux": {
+        "steps": 40, "cfg": 1.0, "guidance": 2.5, "sampler": "dpmpp_2m", "scheduler": "beta",
+        "hires":    {"enabled": true, "scale": 1.5, "denoise": 0.4, "steps": 20},
+        "face_fix": {"enabled": true, "steps": 20, "denoise": 0.4},
+        "hand_fix": {"enabled": true, "steps": 20, "denoise": 0.4}
+      },
+      "qwen": {
+        "steps": 4, "cfg": 1.0, "sampler": "euler", "scheduler": "simple",
+        "hires":    {"enabled": true, "scale": 1.5, "denoise": 0.4, "steps": 4},
+        "face_fix": {"enabled": true, "steps": 4, "denoise": 0.4},
+        "hand_fix": {"enabled": true, "steps": 4, "denoise": 0.4}
+      }
+    },
+    "fast": {
+      "flux": {
+        "steps": 20, "cfg": 1.0, "guidance": 2.5, "sampler": "euler", "scheduler": "beta",
+        "hires":    {"enabled": false, "scale": 1.5, "denoise": 0.4, "steps": 20},
+        "face_fix": {"enabled": false, "steps": 20, "denoise": 0.4},
+        "hand_fix": {"enabled": false, "steps": 20, "denoise": 0.4}
+      },
+      "qwen": {
+        "steps": 4, "cfg": 1.0, "sampler": "euler", "scheduler": "simple",
+        "hires":    {"enabled": false, "scale": 1.5, "denoise": 0.4, "steps": 4},
+        "face_fix": {"enabled": false, "steps": 4, "denoise": 0.4},
+        "hand_fix": {"enabled": false, "steps": 4, "denoise": 0.4}
+      }
+    },
+    "anime": {
+      "flux": {
+        "steps": 28, "cfg": 1.0, "guidance": 4.5, "sampler": "euler_ancestral", "scheduler": "beta",
+        "hires":    {"enabled": false, "scale": 1.5, "denoise": 0.4, "steps": 20},
+        "face_fix": {"enabled": true,  "steps": 20, "denoise": 0.35},
+        "hand_fix": {"enabled": false, "steps": 20, "denoise": 0.35}
+      },
+      "qwen": {
+        "steps": 4, "cfg": 1.0, "sampler": "euler", "scheduler": "simple",
+        "hires":    {"enabled": false, "scale": 1.5, "denoise": 0.4, "steps": 4},
+        "face_fix": {"enabled": true,  "steps": 4, "denoise": 0.35},
+        "hand_fix": {"enabled": false, "steps": 4, "denoise": 0.35}
+      }
+    }
+  }
+}

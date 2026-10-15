@@ -1,0 +1,38 @@
+# Reference copy of the systemd TEMPLATE unit.
+#
+# The real one is generated (with correct user + absolute paths) and installed
+# to /etc/systemd/system/llm-vllm@.service by:
+#
+#     models/<slug>/serve install-service        # or  common/serve.sh <dir> install-service
+#
+# One template, one instance per model:  llm-vllm@qwen3.8-27b-fp8.service
+#   systemctl status  llm-vllm@qwen3.8-27b-fp8
+#   journalctl -u     llm-vllm@qwen3.8-27b-fp8 -f
+#
+# Lifecycle: systemd is the single supervisor. `serve.sh ... run` execs
+# `docker run --rm` in the foreground, so no container --restart policy races
+# with it on boot; the unit's Restart=always is the only supervisor.
+
+[Unit]
+Description=vLLM server: %i
+Requires=docker.service
+After=docker.service nv-docker-gpus.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=1800
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=ss
+Group=docker
+ExecStartPre=-/usr/bin/docker rm -f vllm-%i
+ExecStart=/home/ss/llm/common/serve.sh /home/ss/llm/models/%i run
+ExecStop=/usr/bin/docker stop -t 30 vllm-%i
+ExecStartPost=/usr/bin/timeout 1200 /bin/sh -c 'until [ "$(/usr/bin/docker inspect -f "{{.State.Health.Status}}" vllm-%i 2>/dev/null)" = healthy ]; do sleep 5; done'
+Restart=always
+RestartSec=15
+TimeoutStartSec=1200
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+# Patched vLLM image for Gemma 4 ModelOpt-NVFP4 checkpoints (tied lm_head).
+# Base = the repo's xgrammar-0.2.4 image (tool-calling fix, see
+# models/qwen3.8-27b-fp8/docker/Dockerfile.xgrammar024) + a 2-site patch of
+# vllm/.../quantization/modelopt.py, see patch_modelopt_tied_head.py.
+#
+# Build (after vllm-qwen:26.07-xgrammar024 exists):
+#   docker build -t vllm-gb10:26.07-xg024-tiedhead \
+#     -f models/gemma4-26b-heretic-nvfp4/docker/Dockerfile.tiedhead \
+#     models/gemma4-26b-heretic-nvfp4/docker
+FROM vllm-qwen:26.07-xgrammar024
+COPY patch_modelopt_tied_head.py /tmp/
+RUN python3 -I /tmp/patch_modelopt_tied_head.py && rm /tmp/patch_modelopt_tied_head.py

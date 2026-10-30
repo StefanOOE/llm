@@ -84,7 +84,7 @@ Weights and the vLLM compile cache live outside the repo, by default
 | `qwen3.8-27b-fp8` | `gb10-reasoning` | 8000 | `/v1/chat/completions` | 131072 | Apache 2.0, uncensored | benchmark-tuned, on-demand alternate |
 | `gpt-oss-120b` | `gb10-reasoning` | 8000 | `/v1/chat/completions` | 65536 | Apache 2.0, stock safety | benchmark-tuned, on-demand alternate |
 | `bge-m3` | `gb10-embedding` | 8001 | `/v1/embeddings` | 8192 | MIT | in use, embeddings behind an OpenAI-compatible proxy (systemd, boot) |
-| `comfyui` (`gb10-rendering`) | `gb10-rendering` | 8002 | `/generate` (bridge API) | n/a (image gen) | qwen: Apache 2.0 + 2 community LoRAs; flux: FLUX.1 [dev] non-commercial | smoke-tested, boot-enabled (systemd) |
+| `comfyui` (`gb10-rendering`) | `gb10-rendering` | 8002 | `/generate` (bridge API) | n/a (image gen) | qwen: Apache 2.0 + Lightning LoRA; flux: FLUX.1 [dev] non-commercial | smoke-tested, boot-enabled (systemd) |
 | `gemma4-26b-heretic-nvfp4` | `gb10-writing` | 8004 | `/v1/chat/completions` | 262144 | Apache 2.0, uncensored (Heretic) | smoke-tested, boot-enabled (systemd), German stories / roleplay + non-coding agent profiles, runs **in parallel** with qwen (patched image, see its notes) |
 
 All vLLM models share the 128 GB unified pool — see **Running multiple

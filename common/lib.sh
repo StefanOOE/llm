@@ -289,6 +289,40 @@ wait_health() {
   done
 }
 
+# Boot race: vLLM sizes its KV cache from the memory that is free while it
+# profiles. On unified memory a sibling still loading its weights at that
+# moment is counted against this model ("Available KV cache memory: -22 GiB",
+# seen on two boots), so the start fails. Start one model at a time instead:
+# wait while another vLLM container is still loading (health "starting"), or
+# an llm-vllm@ instance whose name sorts before ours is (re)starting but has
+# no container yet. Name order keeps it cycle-free (a container only exists
+# once its unit stopped waiting); capped so a stuck sibling cannot block us.
+# A sibling that just turned healthy still allocates for a few seconds, which
+# again shrinks our KV cache (8 instead of 14 GiB for gemma), hence the settle.
+WAIT_TURN_MAX=600
+WAIT_TURN_SETTLE=30
+wait_turn() {
+  local deadline busy waited=
+  deadline=$(( $(date +%s) + WAIT_TURN_MAX ))
+  while :; do
+    busy="$(d ps --filter name=^vllm- --filter health=starting --format '{{.Names}}' 2>/dev/null \
+      | grep -vx "$CONTAINER" | tr '\n' ' ' || true)"
+    busy+="$(systemctl list-units --plain --no-legend --state=activating,deactivating 'llm-vllm@*' 2>/dev/null \
+      | awk -v me="llm-vllm@${SLUG}.service" '$1 < me {printf "%s ", $1}' || true)"
+    if [ -z "$busy" ]; then
+      [ -n "$waited" ] && sleep "$WAIT_TURN_SETTLE"
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "still loading after ${WAIT_TURN_MAX}s: ${busy}-- starting anyway" >&2
+      return 0
+    fi
+    echo "waiting for ${busy}to finish loading ..."
+    waited=1
+    sleep 10
+  done
+}
+
 preflight() {
   if ! d image inspect "$VLLM_IMAGE" >/dev/null 2>&1; then
     echo "pulling $VLLM_IMAGE (~15 GB, one-time) ..."
@@ -344,8 +378,10 @@ Group=docker
 ExecStartPre=-/usr/bin/docker rm -f vllm-%i
 ExecStart=${COMMON_DIR}/serve.sh ${LLM_ROOT}/models/%i run
 ExecStop=/usr/bin/docker stop -t 30 vllm-%i
-# hold the unit 'activating' until the container reports healthy (model serving)
-ExecStartPost=/usr/bin/timeout ${STARTUP_TIMEOUT} /bin/sh -c 'until [ "\$(/usr/bin/docker inspect -f "{{.State.Health.Status}}" vllm-%i 2>/dev/null)" = healthy ]; do sleep 5; done'
+# hold the unit 'activating' until the container reports healthy (model
+# serving); give up as soon as the main process is gone, so a failed start
+# restarts after RestartSec instead of sitting out the whole timeout
+ExecStartPost=/usr/bin/timeout ${STARTUP_TIMEOUT} /bin/sh -c 'until [ "\$(/usr/bin/docker inspect -f "{{.State.Health.Status}}" vllm-%i 2>/dev/null)" = healthy ]; do kill -0 "\$MAINPID" 2>/dev/null || exit 1; sleep 5; done'
 Restart=always
 RestartSec=15
 TimeoutStartSec=${STARTUP_TIMEOUT}
@@ -435,6 +471,7 @@ main() {
         # foreground: the systemd unit (or you) supervises this directly.
         # no -d, no --restart (the unit's Restart=always owns that), --rm.
         endpoint_block "reachable once the model finishes loading"
+        wait_turn
         echo "exec: docker run --rm ${CONTAINER}"
         exec_docker run --rm "${RUN_COMMON[@]}" "${VLLM_ARGS[@]}"
       fi

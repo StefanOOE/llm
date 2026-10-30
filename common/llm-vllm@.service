@@ -28,7 +28,7 @@ Group=docker
 ExecStartPre=-/usr/bin/docker rm -f vllm-%i
 ExecStart=/home/ss/llm/common/serve.sh /home/ss/llm/models/%i run
 ExecStop=/usr/bin/docker stop -t 30 vllm-%i
-ExecStartPost=/usr/bin/timeout 1200 /bin/sh -c 'until [ "$(/usr/bin/docker inspect -f "{{.State.Health.Status}}" vllm-%i 2>/dev/null)" = healthy ]; do sleep 5; done'
+ExecStartPost=/usr/bin/timeout 1200 /bin/sh -c 'until [ "$(/usr/bin/docker inspect -f "{{.State.Health.Status}}" vllm-%i 2>/dev/null)" = healthy ]; do kill -0 "$MAINPID" 2>/dev/null || exit 1; sleep 5; done'
 Restart=always
 RestartSec=15
 TimeoutStartSec=1200

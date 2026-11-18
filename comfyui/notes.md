@@ -258,7 +258,10 @@ configuration. If it OOMs, the fallback is treating this as on-demand-only
 
 ## ComfyUI version / native support
 
-Pinned `v0.38.0` (latest at build time). Native Qwen-Image support landed
+Pinned `v0.45.0` since 2026-11-18 (was `v0.38.0`; v0.39-v0.45 had no changes to
+the API or nodes the bridge uses, Impact Pack 8.28 still loads; renders,
+cleanup, abort and the PNG metadata check passed on the new image).
+Native Qwen-Image support landed
 ~v0.37.0 — no custom node pack needed. 0.38.0 adds Qwen-Image-2.1-specific
 optimizations (block compile, KV cache, tiny VAE) that don't apply to 2512,
 harmless either way since 2512 uses the generic Qwen-Image loading path.

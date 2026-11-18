@@ -53,7 +53,7 @@ models/
     ├── notes.md         dense/sparse/ColBERT facts, --runner pooling, fallbacks
     └── serve            thin wrapper -> common/serve.sh with this dir
 comfyui/                gb10-rendering: Qwen-Image-2512 text-to-image, ComfyUI   (different engine, NOT vLLM)
-├── Dockerfile           NGC PyTorch 26.07 (arm64) + ComfyUI v0.38.0 + bridge.py; ONLY bridge.py is exposed
+├── Dockerfile           NGC PyTorch 26.07 (arm64) + ComfyUI v0.45.0 + bridge.py; ONLY bridge.py is exposed
 ├── bridge.py            the published API (POST /generate, GET /health) -- generates, reads bytes, deletes
 │                         the output file + ComfyUI history entry before responding (no-artifact requirement)
 ├── serve.sh             launcher (start|run|stop|logs|status) -- not common/serve.sh, different engine

@@ -9,7 +9,7 @@
 # =============================================================================
 set -euo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-IMAGE="comfyui-qwen-image:v0.38.0"
+IMAGE="comfyui-qwen-image:v0.45.0"
 CONTAINER="comfyui-gb10-rendering"
 PORT=8002
 # Host cache root (models, output, user, bridge); override per box via env.

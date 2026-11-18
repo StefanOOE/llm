@@ -10,15 +10,15 @@
 #  vLLM on this exact box should carry over, instead of gambling on a
 #  different PyTorch build's Blackwell support.
 #
-#  ComfyUI pinned to v0.38.0 (latest at build time, confirmed via GitHub
-#  release) -- ships native Qwen-Image support (added ~v0.37.0, Qwen-Image
-#  2.1-specific optimizations in 0.38.0), no custom node pack needed.
+#  ComfyUI pinned to v0.45.0 (latest at build time, 2026-11; was v0.38.0).
+#  Native Qwen-Image support since ~v0.37.0, no custom node pack needed.
+#  The repo moved to Comfy-Org/ComfyUI (the old URL redirects).
 # =============================================================================
 FROM nvcr.io/nvidia/pytorch:26.07-py3
 
 WORKDIR /opt/ComfyUI
 
-RUN git clone --depth 1 --branch v0.38.0 https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI
+RUN git clone --depth 1 --branch v0.45.0 https://github.com/Comfy-Org/ComfyUI.git /opt/ComfyUI
 
 # requirements.txt lists `torch`/`torchvision`/`torchsde` unpinned -- pip
 # leaves the NGC image's already-installed (CUDA 13/sm_121-matched) torch

@@ -16,7 +16,7 @@ is exactly what ComfyUI's runtime diffusers conversion would produce.
 Runs inside the comfyui image:
 
   docker run --rm -v <src>:/src:ro -v <dst>:/dst -v $PWD:/tools:ro \
-    --entrypoint python3 comfyui-qwen-image:v0.38.0 -I \
+    --entrypoint python3 comfyui-qwen-image:v0.45.0 -I \
     /tools/convert-flux-diffusers.py /src /dst/<name>.safetensors
 """
 import json
